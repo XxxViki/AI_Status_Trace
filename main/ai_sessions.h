@@ -62,3 +62,6 @@ void ai_sessions_maybe_save(void);
 /* 看门狗清理接口：id_prefix 优先(前缀匹配)，否则按 tool 清，都空=清全部。
  * 返回移除的会话数。用于主机侧进程巡检发现"进程已死但卡还在"(#027) */
 int ai_sessions_clear(const char *tool, const char *id_prefix);
+
+/* 只更新 token 计数(不改状态)：实时 token 监视器用（#043） */
+int ai_sessions_set_tokens(const char *sid, int32_t tokens);

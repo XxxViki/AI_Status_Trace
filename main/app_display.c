@@ -54,20 +54,22 @@ static const char *TAG = "disp";
 #define FLASH_MS    333
 
 #define CARD_W      101
-#define CARD_H      144
+#define CARD_H      136
 #define CARD_X0     4
-#define CARD_Y0     24
+#define CARD_Y0     32
 #define CARD_GAP    4
 
 static uint16_t s_frame[PH * PW];          /* 物理竖屏全帧（.bss ~115KB） */
-static uint16_t s_flush_buf[LW * 48];      /* 局部刷新过渡(卡片区148x101=14948需48行) */
+static uint16_t s_flush_buf[LW * 70];      /* 局部刷新过渡(#047: 宽卡 136x160=21760 需70行) */
 static QueueHandle_t s_queue;
 
 /* ---------- 坐标旋转层：逻辑 -> 物理 ---------- */
 
+static int s_clip_x0 = 0, s_clip_x1 = LW - 1;   /* 跑马灯水平裁剪窗口(#038) */
+
 static void px(int lx, int ly, uint16_t c)
 {
-    if (lx < 0 || lx >= LW || ly < 0 || ly >= LH) {
+    if (lx < s_clip_x0 || lx > s_clip_x1 || lx < 0 || lx >= LW || ly < 0 || ly >= LH) {
         return;
     }
     s_frame[lx * PW + (LH - 1 - ly)] = c;   /* px=171-ly, py=lx */
@@ -111,7 +113,10 @@ static void flush_region(int x0, int y0, int x1, int y1)
     int phys_y0 = x0, phys_y1 = x1;
     int w = phys_x1 - phys_x0 + 1, h = phys_y1 - phys_y0 + 1;
     if (w <= 0 || h <= 0 || w * h > (int)(sizeof(s_flush_buf) / sizeof(uint16_t))) {
-        return;   /* 超出过渡缓冲：布局设计上不会发生 */
+        /* #019 的教训：保护分支不许静默跳过——布局改大后必须看得见告警 */
+        ESP_LOGW(TAG, "flush 区域超限被跳过: %dx%d (缓冲 %d)", w, h,
+                 (int)(sizeof(s_flush_buf) / sizeof(uint16_t)));
+        return;
     }
     for (int r = 0; r < h; r++) {
         memcpy(&s_flush_buf[r * w], &s_frame[(phys_y0 + r) * PW + phys_x0],
@@ -169,8 +174,8 @@ static void draw_logo_claude(int x, int y)
         float a = i * (3.1415926f * 2 / 12);
         float dx = cosf(a), dy = sinf(a);
         for (float r = 4.0f; r <= 11.0f; r += 0.5f) {
-            px((int)(cx + dx * r), (int)(cy + dy * r), COL_CLAUDE);
-            px((int)(cx + dx * r) + 1, (int)(cy + dy * r), COL_CLAUDE);
+            int sx = (int)(cx + dx * r), sy = (int)(cy + dy * r);
+            fill_rect(sx, sy, sx + 1, sy + 1, COL_CLAUDE);   /* 2x2 加粗(#039) */
         }
     }
 }
@@ -185,8 +190,7 @@ static void draw_seg(int x0, int y0, int x1, int y1, uint16_t c)
     for (int s = 0; s <= steps; s++) {
         int ix = x0 + (x1 - x0) * s / steps;
         int iy = y0 + (y1 - y0) * s / steps;
-        px(ix, iy, c);
-        px(ix + 1, iy, c);
+        fill_rect(ix, iy, ix + 1, iy + 1, c);   /* 2x2 加粗(#039) */
     }
 }
 
@@ -372,43 +376,124 @@ static void draw_state_age(int cx, int y, const ai_card_info_t *info, int64_t no
     draw_text_centered(cx, y, buf, 1, COL_TXT_DIM);
 }
 
+/* ---------- ×1.5 字号渲染（#045）：像素块缩放，5x7 字形 -> 8x11 ----------
+ * 整数缩放只能在 ×1(6px) 和 ×2(12px) 之间跳；×1.5 用"每源像素占 3/2 目标像素"
+ * 实现半档：字形 8x11、步进 10px —— 比 ×2 小一点，还能多放字符。 */
+static void draw_char_15(int x, int y, char c, uint16_t color)
+{
+    const uint8_t *g = k_font5x7[(int)(unsigned char)c];
+    for (int r = 0; r < FONT5X7_H; r++) {
+        int dy0 = (r * 3) / 2, dy1 = ((r + 1) * 3) / 2 - 1;
+        for (int col = 0; col < FONT5X7_W; col++) {
+            if (g[r] & (0x10 >> col)) {
+                int dx0 = (col * 3) / 2, dx1 = ((col + 1) * 3) / 2 - 1;
+                fill_rect(x + dx0, y + dy0, x + dx1, y + dy1, color);
+            }
+        }
+    }
+}
+
+static void draw_text_15(int x, int y, const char *s, uint16_t color)
+{
+    for (const char *p = s; *p; p++, x += 10) {
+        draw_char_15(x, y, (char)toupper((unsigned char)*p), color);
+    }
+}
+
+/* ---------- 项目名：×1.5 字号（#045 定稿） ----------
+ * 用户要求：所有卡片名字一样大（此前双档字号导致大小不一）。
+ * 用户反馈：不用负片芯片、字号小一点 → ×1.5（8x11 字形，步进 10px），
+ * 容量 9 字符；超长截断 7 字符 + ".."；居中显示。 */
+#define NAME_MARGIN  3
+#define NAME_Y_OFF   90
+#define NAME_H       14
+
+static void draw_card_name(int idx, int card_x, int cw, const ai_card_info_t *info,
+                           bool advance)
+{
+    (void)idx;
+    (void)advance;
+    const char *name = info->project[0] ? info->project
+                       : (info->tool[0] ? info->tool : "SESSION");
+    int x0 = card_x + NAME_MARGIN;
+    int name_y = CARD_Y0 + NAME_Y_OFF;
+    int usable = cw - 2 * NAME_MARGIN;
+    fill_rect(card_x + 1, name_y, card_x + cw - 2, name_y + NAME_H - 1, COL_CARD_BG);
+
+    int len = (int)strlen(name);
+    if (len == 0) {
+        return;
+    }
+
+    /* ×1.5 字号（#045 用户要求：不用负片、字号小一点）：
+     * 容量 9 字符；超出截断 7 字符 + ".."；整体居中 */
+    const int ADV = 10;
+    int k = len;
+    bool truncated = false;
+    if (k * ADV - 2 > usable) {
+        truncated = true;
+        k = 7;
+        if (len < k) {
+            k = len;
+            truncated = false;
+        }
+    }
+
+    char buf[32];
+    int n = 0;
+    for (int i = 0; i < k && name[i]; i++) {
+        buf[n++] = (char)toupper((unsigned char)name[i]);
+    }
+    buf[n] = '\0';
+    int total = n * ADV - 2 + (truncated ? 2 * ADV - 2 : 0);
+    int tx = x0 + (usable - total) / 2;
+    draw_text_15(tx, name_y + 2, buf, COL_TXT);
+    if (truncated) {
+        draw_text_15(tx + n * ADV, name_y + 2, "..", COL_TXT);
+    }
+}
+
+/* ---------- 卡位均分布局（#046）：按实际会话数均分可用宽度 ----------
+ * 1 张 160px 居中 / 2 张各 154px / 3 张各 101px；不再显示空占位盒。 */
+static int s_slot_x[3];
+static int s_slot_w = CARD_W;
+
+static void layout_slots(int n)
+{
+    if (n <= 0) {
+        s_slot_w = CARD_W;
+        return;
+    }
+    const int margin = 4, gap = 4;
+    int w = (LW - 2 * margin - (n - 1) * gap) / n;
+    if (w > 160) {
+        w = 160;                     /* 单卡过宽内容会散 */
+    }
+    int total = n * w + (n - 1) * gap;
+    int x0 = (LW - total) / 2;
+    for (int i = 0; i < n && i < 3; i++) {
+        s_slot_x[i] = x0 + i * (w + gap);
+    }
+    s_slot_w = w;
+}
+
 /* 重画一张卡：徽章/时长/状态词/项目名 + 顶部状态色条 */
 static void draw_card(int idx, const ai_card_info_t *info, int64_t now,
-                      int32_t anim_color)   /* int32_t: RGB565 颜色 >=0x8000,不能用 int16 哨兵 */
+                      int32_t anim_color, int x, int cw)
+                      /* int32_t: RGB565 颜色 >=0x8000,不能用 int16 哨兵 */
 {
-    int x = CARD_X0 + idx * (CARD_W + CARD_GAP);
     int y = CARD_Y0;
 
-    fill_rect(x, y, x + CARD_W - 1, y + CARD_H - 1, COL_CARD);      /* 外框 */
-    fill_rect(x + 1, y + 3, x + CARD_W - 2, y + CARD_H - 2, COL_CARD_BG);
+    fill_rect(x, y, x + cw - 1, y + CARD_H - 1, COL_CARD);      /* 外框 */
+    fill_rect(x + 1, y + 3, x + cw - 2, y + CARD_H - 2, COL_CARD_BG);
 
     uint16_t bar = (anim_color >= 0) ? (uint16_t)anim_color : mode_color(info->lamp);
-    fill_rect(x, y, x + CARD_W - 1, y + 2, bar);
+    fill_rect(x, y, x + cw - 1, y + 2, bar);
 
-    draw_logo(info->tool, x + 7, y + 10);
-    draw_duration(x + CARD_W - 7, y + 12, info->started_ms, now);   /* 会话总时长 */
+    draw_logo(info->tool, x + 7, y + 6);
+    draw_duration(x + cw - 7, y + 6, info->started_ms, now);   /* 会话总时长 */
 
-    draw_text_centered(x + CARD_W / 2, y + 52, mode_word(info->lamp), 2,
-                       mode_color(info->lamp));
-
-    /* 当前状态持续时长（think/等待/卡住各计各的） */
-    draw_state_age(x + CARD_W / 2, y + 78, info, now);
-
-    char proj[16];
-    strlcpy(proj, info->project[0] ? info->project
-             : (info->tool[0] ? info->tool : "SESSION"), sizeof(proj));
-    if ((int)strlen(proj) > 12) {
-        proj[9] = proj[10] = proj[11] = '.';
-        proj[12] = '\0';
-    }
-    draw_text_centered(x + CARD_W / 2, y + 98, proj, 1, COL_TXT);
-
-    /* 最近调用的工具（BA/ED/WR/AG…），填充底部空间且有用 */
-    if (info->last_tool[0]) {
-        draw_text_centered(x + CARD_W / 2, y + 118, info->last_tool, 1, COL_TXT_DIM);
-    }
-
-    /* token 用量（Claude 专属，Stop 事件上报）：↓ 2.7K */
+    /* token 用量（Claude 专属）：logo 右侧、时间下方（#039 布局优化） */
     if (info->tokens > 0) {
         char tb[16];
         if (info->tokens >= 1000) {
@@ -417,9 +502,9 @@ static void draw_card(int idx, const ai_card_info_t *info, int64_t now,
         } else {
             snprintf(tb, sizeof(tb), "%d", (int)info->tokens);
         }
-        int tw = 7 + 2 + text_w(tb, 1);          /* 箭头7px + 间距 + 文本 */
-        int tx = x + CARD_W / 2 - tw / 2;
-        int ay = y + 130;   /* token 行 */
+        int tw = 7 + 2 + text_w(tb, 1);           /* 箭头7px + 间距 + 文本 */
+        int tx = x + cw - 7 - tw;                 /* 右对齐，与时间同列 */
+        int ay = y + 29;   /* #045 与时长拉开距离 */
         fill_rect(tx + 2, ay, tx + 2, ay + 3, COL_TXT_DIM);       /* 箭杆 */
         fill_rect(tx, ay + 4, tx + 4, ay + 4, COL_TXT_DIM);       /* 箭头横杠 */
         fill_rect(tx + 1, ay + 5, tx + 3, ay + 5, COL_TXT_DIM);   /* 收窄 */
@@ -427,7 +512,20 @@ static void draw_card(int idx, const ai_card_info_t *info, int64_t now,
         draw_text(tx + 9, ay, tb, 1, COL_TXT_DIM);
     }
 
-    flush_region(x, y, x + CARD_W - 1, y + CARD_H - 1);
+    draw_text_centered(x + cw / 2, y + 44, mode_word(info->lamp), 2,
+                       mode_color(info->lamp));
+
+    /* 当前状态持续时长（think/等待/卡住各计各的） */
+    draw_state_age(x + cw / 2, y + 70, info, now);
+
+    draw_card_name(idx, x, cw, info, false);   /* ×1.5 字号(#045) */
+
+    /* 最近调用的工具（BA/ED/WR/AG…），填充底部空间且有用 */
+    if (info->last_tool[0]) {
+        draw_text_centered(x + cw / 2, y + 112, info->last_tool, 1, COL_TXT_DIM);
+    }
+
+    flush_region(x, y, x + cw - 1, y + CARD_H - 1);   /* #048: 参数化后必须用 cw */
 }
 
 /* ---------- 头部：会话数 + 全员 mini-logo 彩带（#035） ----------
@@ -441,10 +539,10 @@ static void draw_card(int idx, const ai_card_info_t *info, int64_t now,
  *   BOOT 键(GPIO9)翻页 = 其余会话也能上卡片看清
  */
 #define MAX_RIBBON  8      /* 与会话表上限一致 */
-#define HEADER_H    22     /* 头部高度(放大后) */
-#define TILE        20     /* mini-logo 格边长(已放大) */
+#define HEADER_H    28     /* 头部高度(#039 再加高) */
+#define TILE        24     /* mini-logo 格边长(#039 再放大) */
 #define TILE_GAP    2
-#define TILE_TOP    1     /* (HEADER_H-TILE)/2 */
+#define TILE_TOP    2     /* (HEADER_H-TILE)/2 */
 #define TILE_RIGHT  6
 
 /* 第 i 格的 x 起点，n=总格数。全/快路径共用保证几何一致 */
@@ -470,12 +568,13 @@ static void draw_mini_glyph(const char *tool, int x, int y, uint16_t fg)
         fill_circle(cx, cy, 1, fg);
         for (int i = 0; i < 8; i++) {
             float a = i * 3.1415926f / 4.0f;
-            for (float r = 3.0f; r <= 8.5f; r += 0.5f) {
-                px((int)(cx + cosf(a) * r), (int)(cy + sinf(a) * r), fg);
+            for (float r = 3.5f; r <= 10.0f; r += 0.5f) {
+                int sx = (int)(cx + cosf(a) * r), sy = (int)(cy + sinf(a) * r);
+                fill_rect(sx, sy, sx + 1, sy + 1, fg);   /* 2x2 加粗(#039) */
             }
         }
     } else if (strcmp(tool, "codex") == 0) {
-        draw_ring6(cx, cy, 7, fg);
+        draw_ring6(cx, cy, 8, fg);
     } else if (strcmp(tool, "trae") == 0) {
         /* 矩形外框 + 中间两个方块（真标志的迷你版） */
         fill_rect(x + 2, y + 2, x + TILE - 3, y + 3, fg);
@@ -487,11 +586,50 @@ static void draw_mini_glyph(const char *tool, int x, int y, uint16_t fg)
     } else {
         char c = (tool[0] == '\0') ? '?' : (char)toupper((unsigned char)tool[0]);
         char s[2] = { c, '\0' };
-        draw_text(cx - text_w(s, 1) / 2, cy - 3, s, 1, fg);
+        /* ×3 字号(15x21)填满 24px 格子 + 错位二次描画加粗
+         * （#039 用户反馈"又细又小"——此前一直是 ×1 的 5x7 像素） */
+        int tx = cx - text_w(s, 3) / 2;
+        draw_text(tx, cy - 10, s, 3, fg);
+        draw_text(tx + 1, cy - 9, s, 3, fg);
     }
 }
 
-/* 画一格：底色=状态色(可选动画)，字形=工具 logo；on_page=false 时整体调暗 */
+/* 工具官方品牌色（#040 用户要求 logo 颜色与官方一致） */
+static uint16_t brand_color(const char *tool)
+{
+    if (strcmp(tool, "claude") == 0) {
+        return COL_CLAUDE;                       /* Anthropic 珊瑚橘 */
+    }
+    if (strcmp(tool, "zcode") == 0) {
+        return COL_ZCODE;                        /* ZCode 蓝 */
+    }
+    if (strcmp(tool, "trae") == 0) {
+        return RGB565(0x00, 0xb9, 0xa6);         /* Trae 青绿 */
+    }
+    if (strcmp(tool, "chatgpt") == 0) {
+        return RGB565(0x10, 0xa3, 0x7f);         /* OpenAI 绿 */
+    }
+    if (strcmp(tool, "hermes") == 0) {
+        return RGB565(0x8b, 0x5c, 0xf6);         /* Hermes 紫 */
+    }
+    return 0;                                    /* 0 = 无品牌色(单色品牌/未知),自适应 */
+}
+
+/* 画一格：底色=状态色(可选动画)，字形=官方品牌色 + 自适应对比阴影
+ * （品牌色压在状态色底上可能对比不足，如珊瑚橘压红底——先画 1px 自适应色
+ *   阴影再看品牌色，等价于描边，保证任意底色可辨） */
+static void tile_glyph(const ai_card_info_t *info, int x, uint16_t bg_on)
+{
+    uint16_t brand = brand_color(info->tool);
+    uint16_t edge = glyph_contrast(bg_on);
+    if (brand == 0) {
+        draw_mini_glyph(info->tool, x, TILE_TOP, edge);
+        return;
+    }
+    draw_mini_glyph(info->tool, x + 1, TILE_TOP + 1, edge);   /* 阴影/描边 */
+    draw_mini_glyph(info->tool, x, TILE_TOP, brand);          /* 品牌色 */
+}
+
 static void draw_tile(const ai_card_info_t *info, int x, bool on_page,
                       int64_t now, bool animate)
 {
@@ -505,7 +643,7 @@ static void draw_tile(const ai_card_info_t *info, int x, bool on_page,
         bg = blend565(on, COL_CARD, 115);     /* 折叠：暗一档 */
     }
     fill_rect(x, TILE_TOP, x + TILE - 1, TILE_TOP + TILE - 1, bg);
-    draw_mini_glyph(info->tool, x, TILE_TOP, glyph_contrast(on));
+    tile_glyph(info, x, on);
 }
 
 /* 重绘头部整条（relayout 时调用） */
@@ -516,11 +654,18 @@ static void draw_header(const ai_card_info_t *all, int n, int shown,
 
     char buf[48];
     if (pages > 1) {
-        snprintf(buf, sizeof(buf), "%d SESS  %d/%d", n, page + 1, pages);
+        snprintf(buf, sizeof(buf), "%d SESSIONS  %d/%d", n, page + 1, pages);
     } else {
         snprintf(buf, sizeof(buf), "%d SESSION%s", n, n == 1 ? "" : "S");
     }
-    draw_text(6, (HEADER_H - 7) / 2, buf, 1, COL_TXT_DIM);
+    /* 文字在"格子左侧区域"内居中（#039 用户要求居中显示） */
+    int tiles_start = (n > 0) ? tile_x(n, 0) : LW - TILE_RIGHT;
+    int tw = text_w(buf, 1);
+    int tx = (tiles_start - tw) / 2;
+    if (tx < 4) {
+        tx = 4;
+    }
+    draw_text(tx, (HEADER_H - 7) / 2, buf, 1, COL_TXT_DIM);
 
     int start = page * 3;
     for (int i = 0; i < n && i < MAX_RIBBON; i++) {
@@ -541,6 +686,13 @@ static uint16_t card_anim_color(const ai_card_info_t *info, int64_t now)
 /* ---------- 主任务 ---------- */
 
 #define BOOT_BTN_GPIO     GPIO_NUM_9   /* 厂商确认：BOOT 键=GPIO9，低电平有效 */
+
+static volatile int s_page_req = -1;   /* /dbg/page 用的请求式翻页 */
+
+void app_display_set_page(int page)
+{
+    s_page_req = page;
+}
 #define PAGE_SIZE         3
 #define PAGE_HOME_MS      20000        /* 手动翻页后 20 秒自动回第 1 页 */
 #define BTN_DEBOUNCE_MS   150
@@ -558,13 +710,9 @@ static void display_task(void *arg)
     };
     gpio_config(&btn_cfg);
 
-    /* 底图 */
+    /* 底图（#046：不再画空占位盒，卡位按会话数动态均分） */
     for (int i = 0; i < PH * PW; i++) {
         s_frame[i] = COL_BG;
-    }
-    for (int c = 0; c < 3; c++) {
-        int x = CARD_X0 + c * (CARD_W + CARD_GAP);
-        fill_rect(x, CARD_Y0, x + CARD_W - 1, CARD_Y0 + CARD_H - 1, COL_CARD);
     }
     flush_all();
 
@@ -574,6 +722,7 @@ static void display_task(void *arg)
     uint16_t last_tile0_anim = 0xFFFF;
     lamp_mode_t last_mode = LAMP_OFF;
     int last_n = -1;
+    int last_shown = -1;
     int page = 0;
     int64_t page_set_ms = 0;
     bool btn_prev = false;
@@ -612,6 +761,14 @@ static void display_task(void *arg)
             force_relayout = true;
         }
 
+        /* 调试端点请求的翻页 */
+        if (s_page_req >= 0) {
+            page = s_page_req % pages;
+            s_page_req = -1;
+            page_set_ms = now;
+            force_relayout = true;
+        }
+
         /* BOOT 键翻页（按下沿触发 + 去抖） */
         bool btn = (gpio_get_level(BOOT_BTN_GPIO) == 0);
         if (btn && !btn_prev && now - btn_last_ms > BTN_DEBOUNCE_MS) {
@@ -640,20 +797,28 @@ static void display_task(void *arg)
 
         /* 刷新策略：每 500ms 全量重画卡片（时长/冒号跳秒），
          * 中间的 50ms 动画帧只刷各卡色条 + 头部第 1 格 mini-logo */
+        int prev_w = s_slot_w;
+        int prev_shown = last_shown;
+        layout_slots(shown);
+        last_shown = shown;
+
         bool relayout = force_relayout || (now - last_layout_ms >= 500);
         if (relayout) {
             force_relayout = false;
             last_layout_ms = now;
+            if (s_slot_w != prev_w || shown != prev_shown) {
+                /* 卡位几何变化：清整条卡区（避免旧卡残影）。
+                 * #047：整条 320x136 转置后超缓冲，分两条 320x68 刷 */
+                int half = CARD_H / 2;
+                fill_rect(0, CARD_Y0, LW - 1, CARD_Y0 + half - 1, COL_BG);
+                flush_region(0, CARD_Y0, LW - 1, CARD_Y0 + half - 1);
+                fill_rect(0, CARD_Y0 + half, LW - 1, CARD_Y0 + CARD_H - 1, COL_BG);
+                flush_region(0, CARD_Y0 + half, LW - 1, CARD_Y0 + CARD_H - 1);
+            }
             for (int i = 0; i < shown; i++) {
                 uint16_t c = card_anim_color(&all[start + i], now);
-                draw_card(i, &all[start + i], now, (int32_t)c);
+                draw_card(i, &all[start + i], now, (int32_t)c, s_slot_x[i], s_slot_w);
                 last_card_anim[i] = c;
-            }
-            for (int i = shown; i < 3; i++) {
-                int x = CARD_X0 + i * (CARD_W + CARD_GAP);
-                fill_rect(x, CARD_Y0, x + CARD_W - 1, CARD_Y0 + CARD_H - 1, COL_CARD);
-                flush_region(x, CARD_Y0, x + CARD_W - 1, CARD_Y0 + CARD_H - 1);
-                last_card_anim[i] = 0xFFFF;
             }
             draw_header(all, n, shown, page, pages, now);
             last_tile0_anim = mode_anim_color(all[0].lamp, mode_color(all[0].lamp),
@@ -663,9 +828,9 @@ static void display_task(void *arg)
             for (int i = 0; i < shown; i++) {
                 uint16_t c = card_anim_color(&all[start + i], now);
                 if (c != last_card_anim[i]) {
-                    int bx = CARD_X0 + i * (CARD_W + CARD_GAP);
-                    fill_rect(bx, CARD_Y0, bx + CARD_W - 1, CARD_Y0 + 2, c);
-                    flush_region(bx, CARD_Y0, bx + CARD_W - 1, CARD_Y0 + 2);
+                    int bx = s_slot_x[i];
+                    fill_rect(bx, CARD_Y0, bx + s_slot_w - 1, CARD_Y0 + 2, c);
+                    flush_region(bx, CARD_Y0, bx + s_slot_w - 1, CARD_Y0 + 2);
                     last_card_anim[i] = c;
                 }
             }
@@ -676,7 +841,7 @@ static void display_task(void *arg)
                 if (hc != last_tile0_anim) {
                     int x = tile_x(n, 0);
                     fill_rect(x, TILE_TOP, x + TILE - 1, TILE_TOP + TILE - 1, hc);
-                    draw_mini_glyph(all[0].tool, x, TILE_TOP, glyph_contrast(mode_color(all[0].lamp)));
+                    tile_glyph(&all[0], x, mode_color(all[0].lamp));
                     flush_region(x, TILE_TOP, x + TILE - 1, TILE_TOP + TILE - 1);
                     last_tile0_anim = hc;
                 }
@@ -691,6 +856,14 @@ void app_display_init(void)
 {
     s_queue = xQueueCreate(10, sizeof(ai_event_msg_t));
     xTaskCreate(display_task, "display", 6144, NULL, 4, NULL);
+}
+
+uint16_t app_display_pixel(int lx, int ly)
+{
+    if (lx < 0 || lx >= LW || ly < 0 || ly >= LH) {
+        return 0;
+    }
+    return s_frame[lx * PW + (LH - 1 - ly)];
 }
 
 QueueHandle_t app_display_queue(void)

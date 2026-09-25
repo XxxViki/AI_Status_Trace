@@ -31,7 +31,7 @@ static const char *TAG = "sessions";
 typedef struct {
     char       session_id[40];
     char       tool[8];
-    char       project[16];
+    char       project[32];   /* #038 扩容 */
     char       last_tool[12];  /* 最近调用的工具（Bash/Edit…） */
     int32_t    tokens;         /* 上下文 token 用量（Claude 专属） */
     ai_state_t state;          /* 语义状态：IDLE/WORKING/DONE/ERROR(=等审批) */
@@ -185,7 +185,9 @@ void ai_sessions_on_event(const ai_event_msg_t *msg)
         s->tokens = msg->tokens;
         s_dirty = true;
     }
-    if (msg->project[0]) {
+    /* 项目名只在会话首次事件时锁定(#037)：ZCode 的 cwd 会跟着终端 cd 漂移，
+     * 若每次覆盖，卡片名字会变来变去（用户看到的"任务名不对"）*/
+    if (msg->project[0] && !s->project[0]) {
         strlcpy(s->project, msg->project, sizeof(s->project));
     }
     s_dirty = true;
@@ -344,7 +346,7 @@ int ai_sessions_top(ai_card_info_t *out, int max)
 
 typedef struct __attribute__((packed)) {
     uint8_t used, state;
-    char    id[40], tool[8], proj[16], last_tool[12];
+    char    id[40], tool[8], proj[32], last_tool[12];
     int32_t tokens;
     int64_t started_ms, state_since_ms, last_event_ms;
 } slot_blob_t;
@@ -360,7 +362,7 @@ void ai_sessions_maybe_save(void)
         return;
     }
     uint8_t buf[9 + 1 + sizeof(slot_blob_t) * MAX_SESSIONS];
-    buf[0] = 3;   /* blob 版本: 结构/语义变更必须递增,旧版直接废弃(#024/#026) */
+    buf[0] = 4;   /* blob 版本: 结构/语义变更必须递增,旧版直接废弃(#024/#026/#038) */
     int64_t up = now_ms();
     memcpy(buf + 1, &up, 8);
     uint8_t n = 0;
@@ -396,7 +398,7 @@ void ai_sessions_load(void)
     uint8_t buf[9 + 1 + sizeof(slot_blob_t) * MAX_SESSIONS];
     size_t len = sizeof(buf);
     if (nvs_get_blob(h, "sessions", buf, &len) != ESP_OK || len < 10
-        || buf[0] != 3) {
+        || buf[0] != 4) {
         /* 版本不符(结构已变更)或无数据: 废弃旧 blob,干净起步(#024) */
         nvs_erase_key(h, "sessions");
         nvs_commit(h);
@@ -459,4 +461,25 @@ int ai_sessions_clear(const char *tool, const char *id_prefix)
         s_dirty = true;
     }
     return n;
+}
+
+int ai_sessions_set_tokens(const char *sid, int32_t tokens)
+{
+    if (sid == NULL || sid[0] == '\0') {
+        return 0;
+    }
+    int plen = (int)strlen(sid);
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!s_slots[i].used) {
+            continue;
+        }
+        if (strncmp(s_slots[i].session_id, sid, plen) == 0) {
+            if (s_slots[i].tokens != tokens) {
+                s_slots[i].tokens = tokens;
+                s_dirty = true;
+            }
+            return 1;
+        }
+    }
+    return 0;
 }

@@ -94,7 +94,7 @@ static esp_err_t events_post(httpd_req_t *req)
 {
     /* 局部声明区（查询解析要用 msg_tool） */
     char msg_tool[8] = "";
-    char proj[16] = "";
+    char proj[32] = "";
     char msg_toolname[12] = "";
     char sid_param[48] = {0};
     char tool_param[16] = {0};
@@ -278,6 +278,63 @@ static esp_err_t sessions_clear_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* POST /sessions/tok?sid=<会话id>&tok=N —— 只更新 token 计数，不改状态。
+ * 实时 token 监视器（看门狗）用：转录文件一有新 usage 就推（#043） */
+static esp_err_t sessions_tok_post(httpd_req_t *req)
+{
+    char query[160] = {0};
+    char sid[48] = {0};
+    char tok_s[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "sid", sid, sizeof(sid));
+        httpd_query_key_value(query, "tok", tok_s, sizeof(tok_s));
+    }
+    int updated = ai_sessions_set_tokens(sid, atoi(tok_s));
+    char body[32];
+    snprintf(body, sizeof(body), "{\"updated\":%d}", updated);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/* GET /dbg/row?y=<逻辑行> —— 导出该行像素(每2px一个RGB565十六进制)。
+ * #047 排查"右半屏不显示"用：直接看帧缓冲真相，不再靠猜 */
+static esp_err_t dbg_row_get(httpd_req_t *req)
+{
+    char query[64] = {0};
+    char y_s[8] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "y", y_s, sizeof(y_s));
+    }
+    int ly = atoi(y_s);
+    if (ly < 0 || ly >= 172) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad y");
+        return ESP_FAIL;
+    }
+    static char out[320 * 5 + 8];
+    int o = 0;
+    for (int lx = 0; lx < 320 && o < (int)sizeof(out) - 8; lx += 2) {
+        o += snprintf(out + o, sizeof(out) - o, "%04X", app_display_pixel(lx, ly));
+    }
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/* GET /dbg/page?p=N —— 调试用切页（验证多页渲染） */
+static esp_err_t dbg_page_get(httpd_req_t *req)
+{
+    char query[64] = {0};
+    char p_s[8] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "p", p_s, sizeof(p_s));
+    }
+    app_display_set_page(atoi(p_s));
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "ok", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 esp_err_t app_http_start(void)
 {
     httpd_handle_t server = NULL;
@@ -296,11 +353,17 @@ esp_err_t app_http_start(void)
     static const httpd_uri_t state  = { .uri = "/state",  .method = HTTP_GET, .handler = state_get };
     static const httpd_uri_t events = { .uri = "/events", .method = HTTP_POST, .handler = events_post };
     static const httpd_uri_t clear  = { .uri = "/sessions/clear", .method = HTTP_POST, .handler = sessions_clear_post };
+    static const httpd_uri_t stok   = { .uri = "/sessions/tok", .method = HTTP_POST, .handler = sessions_tok_post };
+    static const httpd_uri_t dbgrow = { .uri = "/dbg/row", .method = HTTP_GET, .handler = dbg_row_get };
+    static const httpd_uri_t dbgpage = { .uri = "/dbg/page", .method = HTTP_GET, .handler = dbg_page_get };
 
     httpd_register_uri_handler(server, &health);
     httpd_register_uri_handler(server, &state);
     httpd_register_uri_handler(server, &events);
     httpd_register_uri_handler(server, &clear);
+    httpd_register_uri_handler(server, &stok);
+    httpd_register_uri_handler(server, &dbgrow);
+    httpd_register_uri_handler(server, &dbgpage);
 
     ESP_LOGI(TAG, "HTTP 服务已启动，端口 %d", cfg.server_port);
     return ESP_OK;

@@ -37,7 +37,7 @@ typedef struct {
     ai_state_t      state;              /* 由 event 映射好的灯状态 */
     char            session_id[40];     /* 会话标识 */
     char            tool[8];            /* ai 工具：claude / zcode */
-    char            project[16];        /* 项目名（cwd 的 basename，ASCII）*/
+    char            project[32];        /* 项目名（cwd basename，长名不截断#038）*/
     char            last_tool[12];      /* 最近调用的工具名（Bash/Edit…）*/
     int32_t         tokens;             /* 上下文 token 用量（Stop 事件附带）*/
 } ai_event_msg_t;

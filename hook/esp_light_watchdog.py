@@ -107,6 +107,86 @@ def enqueue_event(event_type, src, body: bytes, tok: int = 0):
         f.write(body)
 
 
+CLAUDE_PROJ_GLOB = os.path.join(os.path.expanduser("~"), ".claude", "projects", "*", "*.jsonl")
+_tok_state = {}   # path -> [offset, last_tok, pending_bytes]
+
+
+def claude_token_watch():
+    """职责四(#043)：实时 token 监视——直接跟 Claude 转录文件。
+
+    用户要求"实时刷新"（不是每轮结束才变）。转录按行追加，每条 assistant
+    消息带 usage；本函数增量读取新增行，取最新非零 usage 的总和，
+    变化即推 POST /sessions/tok（只改 token 不改状态）。
+    只跟 10 分钟内活跃的文件；pending 缓冲处理"写字过程中"的半行。"""
+    import glob as _glob
+    now = time.time()
+    for path in _glob.glob(CLAUDE_PROJ_GLOB):
+        try:
+            if now - os.path.getmtime(path) > 600:
+                continue
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        sid = os.path.basename(path)[:-6]          # 去 .jsonl
+        st = _tok_state.get(path)
+        if st is None:
+            st = [max(0, size - 65536), 0, b""]    # [偏移, 已推送值, 半行缓冲]
+            _tok_state[path] = st
+        if size < st[0]:                           # 文件被重写/截断
+            st[0] = 0
+            st[2] = b""
+        if size == st[0]:
+            continue
+        try:
+            with open(path, "rb") as f:
+                f.seek(st[0])
+                chunk = f.read()
+        except OSError:
+            continue
+        data = st[2] + chunk
+        *lines, st[2] = data.split(b"\n")
+        st[0] = size
+        tok = st[1]
+        for raw in lines:
+            raw = raw.strip()
+            if not raw.startswith(b"{"):
+                continue
+            try:
+                obj = json.loads(raw.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            m = obj.get("message")
+            u = m.get("usage") if isinstance(m, dict) else None
+            if not isinstance(u, dict):
+                u = obj.get("usage")
+            if isinstance(u, dict):
+                t = (int(u.get("input_tokens") or 0)
+                     + int(u.get("cache_read_input_tokens") or 0)
+                     + int(u.get("cache_creation_input_tokens") or 0))
+                if t > 0:
+                    tok = t                          # 保留最后一个非零
+        if tok > 0 and tok != st[1]:
+            st[1] = tok
+            try:
+                url = f"{BOARD}/sessions/tok?sid={sid}&tok={tok}"
+                req = urllib.request.Request(url, data=b"{}",
+                                             headers={"Content-Type": "application/json"})
+                with opener().open(req, timeout=2) as r:
+                    resp = json.loads(r.read())
+                if not resp.get("updated"):
+                    st[1] = -1     # 板上暂无此卡(未建立/已被清):下次强制重推
+            except Exception:
+                pass
+    # 状态表清理：防长跑后无限增长
+    if len(_tok_state) > 32:
+        for p in list(_tok_state):
+            try:
+                if now - os.path.getmtime(p) > 3600:
+                    del _tok_state[p]
+            except OSError:
+                del _tok_state[p]
+
+
 def drain_queue():
     """职责三(#030)：转发 hook 写下的本地事件队列到板子。
 
@@ -240,18 +320,13 @@ def proc_rules():
     claude_cards = [c for c in cards if c.get("tool") == "claude"]
     zcode_cards = [c for c in cards if c.get("tool") == "zcode"]
 
-    # 防护：只清"安静至少 10 秒"的卡（进程名检测若失效也不误杀活跃会话）
+    # 防护：只清"安静至少 10 秒"的卡
     quiet = [c for c in claude_cards if c.get("idle_s", 0) >= 10]
+    # 只在"进程全没了"时清——计数匹配(1<n)已被证实会清错卡（#044：
+    # 幽灵"?"卡使卡数虚高，把真实会话卡当"最闲"误删），故只保留全清场景
     if quiet and claude_n == 0 and len(quiet) == len(claude_cards):
         r = board_clear(tool="claude")
         log(f"claude 进程 0 个但板上 {len(claude_cards)} 卡 -> 全清 {r}")
-    elif claude_cards and 0 < claude_n < len(claude_cards):
-        victims = sorted(quiet, key=lambda c: -c.get("idle_s", 0))
-        victims = victims[: max(0, len(claude_cards) - claude_n)]
-        for v in victims:
-            r = board_clear(id_prefix=v["id"])
-            log(f"claude 进程 {claude_n} < 卡数 {len(claude_cards)} "
-                f"-> 清最闲 {v['id']}(idle {v.get('idle_s')}s) {r}")
 
     if zcode_cards and not zcode_alive:
         r = board_clear(tool="zcode")
@@ -259,11 +334,17 @@ def proc_rules():
 
 
 def main() -> int:
-    log("看门狗启动(v3: 队列转发 + 进程巡检 + 批准加速)")
+    log("看门狗启动(v4: 队列转发 + 进程巡检 + 批准加速 + 实时token)")
     tailer = ZCodeLogTailer(ZCODE_LOG_GLOB)
     tick = 0
     while True:
         tick += 1
+        # 职责四：实时 token 监视（每 1 秒，直接跟 Claude 转录文件 #043）
+        try:
+            claude_token_watch()
+        except Exception as e:
+            log(f"token监视异常: {type(e).__name__}: {e}")
+
         # 职责三：转发 hook 事件队列（每 1 秒，网络彻底移出 AI 关键路径 #030）
         try:
             drain_queue()
