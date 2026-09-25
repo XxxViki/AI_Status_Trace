@@ -1,0 +1,26 @@
+# ==============================================================
+# 行尾规范：避免另一台电脑 clone 时被自动转换坏掉
+#   Windows 的 cmd 对 LF-only 的 .bat/.cmd 容错很差（可能报"不是内部或外部命令"），
+#   所以批处理强制 CRLF；源码和文档统一 LF，diff 才干净。
+# ==============================================================
+* text=auto
+
+# 批处理：必须 CRLF（hook/ai_status_hook.cmd 也由安装器按 CRLF 生成）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 源码与文档：LF
+*.c    text eol=lf
+*.h    text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.csv  text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+
+# 二进制：不做任何转换
+*.bin binary
+*.elf binary
+*.png binary
+*.jpg binary

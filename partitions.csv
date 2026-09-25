@@ -1,0 +1,5 @@
+# Name,   Type, SubType, Offset,   Size, Flags
+# NVS: 阶段2 存 WiFi SSID/密码
+nvs,       data, nvs,     0x9000,   0x6000,
+# 应用分区
+factory,   0,    0,       0x10000,  3M,

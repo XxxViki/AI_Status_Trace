@@ -1,0 +1,48 @@
+# ==============================================================
+# AI_Status 忽略规则
+#   原则：能被 sdkconfig.defaults / 源码 / 依赖清单重新生成的，
+#         以及只属于本机环境的，一律不入库。
+#   目标：另一台电脑 clone 下来 -> build.bat -> 直接可用。
+# ==============================================================
+
+# ---------- 构建产物：ESP-IDF 所有产物都在这里，约 200MB+ ----------
+build/
+build-*/
+cmake-build-*/
+
+# ---------- set-target / menuconfig 生成的完整配置 ----------
+# sdkconfig.defaults 是"种子"必须入库；sdkconfig 是它的生成物，
+# 且 menuconfig 填的 WiFi 密码会明文躺在这里 —— 绝不入库
+sdkconfig
+sdkconfig.old
+
+# ---------- 组件管理器下载的第三方组件 ----------
+# 由 main/idf_component.yml 声明、首次构建自动下载；
+# dependencies.lock 要入库：锁定 espressif/cjson 的版本，保证另一台机器解析出同一个
+managed_components/
+
+# ---------- 本机 IDE / 编辑器配置 ----------
+.vscode/
+.idea/
+*.code-workspace
+
+# ---------- hook 运行期产物（真正的日志写在 ~/.ai_status/，这里兜底）----------
+__pycache__/
+*.pyc
+*.log
+hook/*.log
+.ai_status/
+
+# ---------- 系统垃圾文件 ----------
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---------- 临时文件 / 备份 ----------
+*.tmp
+*.bak
+*.bak-*
+*~
+
+# ---------- 可选的"再减一刀"（当前保留入库，想去掉就把下面一行取消注释）----------
+# hook/esp_light_hook.ps1   # v1 原型，功能已被 ai_status_hook.cmd 取代

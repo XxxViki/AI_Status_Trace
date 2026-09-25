@@ -1,0 +1,11 @@
+menu "AI Status Configuration"
+
+    config AI_STATUS_WIFI_SSID
+        string "WiFi SSID (2.4GHz only)"
+        default "Xxx"
+
+    config AI_STATUS_WIFI_PASSWORD
+        string "WiFi password"
+        default "xxxxxxxx"
+
+endmenu

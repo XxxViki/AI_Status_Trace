@@ -1,0 +1,16 @@
+# AI Light · 阶段 1 默认配置
+# 注意：厂商例程的 sdkconfig.defaults 里有 CONFIG_SPIRAM=y 等 ESP32-S3 遗留配置，
+# ESP32-C3 没有 PSRAM，照抄会导致配置被忽略甚至构建异常，这里只保留真正需要的。
+#
+# 本文件是唯一事实来源：sdkconfig 不入库（生成物 + 含 WiFi 密码），
+# 另一台电脑 clone 后由本文件重新生成，所以这里必须写全"非默认"的配置。
+
+# 目标芯片（写在这里，新机器直接 idf.py build 即可，不写就得先 set-target）
+CONFIG_IDF_TARGET="esp32c3"
+
+# 板载 4MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# 自定义分区表（阶段 2 的 WiFi 凭据要存 NVS，现在就把分区规划好）
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
