@@ -55,22 +55,14 @@ ZCODE_EVENTS = {
 # 批处理包装（ASCII only！见问题记录 #004 的中文 .bat 编码坑）
 WRAPPER_TEMPLATE = (
     "@echo off\r\n"
-    "rem AI Status hook wrapper v4: self-log + src param + hardcoded curl (#021/#022)\r\n"
+    "rem AI Status hook wrapper v5: queue-to-file (#030)\r\n"
+    "rem Network moved OFF the AI critical path: hook only appends a local file (~30ms);\r\n"
+    "rem the resident watchdog forwards the queue to the board with retries.\r\n"
     "rem %1=event, %2=tool source (claude/zcode)\r\n"
     "echo [%date% %time%] ev=%~1 src=%~2 cwd=%cd% >> \"%USERPROFILE%\\.ai_status\\hook_exec.log\"\r\n"
-    "set \"EV=%~1\"\r\n"
-    "set \"SRC=%~2\"\r\n"
-    "if \"%EV%\"==\"pre-tool-use\" goto fast\r\n"
-    "if \"%EV%\"==\"post-tool-use\" goto fast\r\n"
-    "if \"%EV%\"==\"prompt-submit\" goto fast\r\n"
-    f"C:\\Windows\\System32\\curl.exe -s -m 3 --retry 3 --retry-all-errors"
-    f" --retry-delay 1 -X POST \"{BOARD_URL}/events?event_type=%EV%&src=%SRC%\""
-    " --data-binary @- >nul 2>&1\r\n"
-    "exit /b 0\r\n"
-    ":fast\r\n"
-    f"C:\\Windows\\System32\\curl.exe -s -m 2 --retry 1 --retry-all-errors"
-    f" -X POST \"{BOARD_URL}/events?event_type=%EV%&src=%SRC%\""
-    " --data-binary @- >nul 2>&1\r\n"
+    "set \"QDIR=%USERPROFILE%\\.ai_status\\queue\"\r\n"
+    "if not exist \"%QDIR%\" mkdir \"%QDIR%\"\r\n"
+    "findstr /R \".*\" > \"%QDIR%\\%~1_%~2_%RANDOM%%RANDOM%.ev\"\r\n"
     "exit /b 0\r\n"
 )
 

@@ -17,12 +17,14 @@ AI Status 主机侧看门狗（双职责）
 import glob
 import json
 import os
+import random
 import subprocess
 import sys
 import time
 import urllib.request
 
 BOARD = "http://192.168.1.20"
+QUEUE_DIR = os.path.join(os.path.expanduser("~"), ".ai_status", "queue")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".ai_status", "watchdog.log")
 ZCODE_LOG_GLOB = os.path.join(os.path.expanduser("~"), ".zcode", "cli", "log", "zcode-*.jsonl")
 PROC_SCAN_EVERY = 3   # 秒
@@ -68,6 +70,91 @@ def board_event(event_type, src, session_id, tool_name=None):
                                  headers={"Content-Type": "application/json"})
     with opener().open(req, timeout=4) as r:
         return r.read().decode()
+
+
+def board_event_raw(event_type, src, body: bytes, tok: int = 0):
+    """原样转发一条队列事件（body 是 hook 的原始 stdin payload）。
+    超时 2s：本机 2.4G 环境往返 0.3-2.7s，2s 是"够快"与"够宽容"的平衡点；
+    失败由调用方保序重试（下轮），代价低。
+    #033：Python 侧完整解析 body 提取 session/tool 放 URL——板内只扫前512字节，
+    Stop 类大载荷的 sessionId 可能在截断线之后（会错落进 "?" 会话）。"""
+    url = f"{BOARD}/events?event_type={event_type}&src={src}"
+    try:
+        j = json.loads(body.decode("utf-8", "replace")) if body.strip() else {}
+        sid = j.get("session_id") or j.get("sessionId") or ""
+        tool = j.get("tool_name") or j.get("toolName") or ""
+        if sid:
+            url += f"&sid={sid}"
+        if tool:
+            url += f"&tool={tool}"
+    except Exception:
+        pass
+    if tok > 0:
+        url += f"&tok={tok}"
+    req = urllib.request.Request(url, data=body,
+                                 headers={"Content-Type": "application/json"})
+    with opener().open(req, timeout=2) as r:
+        return r.read().decode()
+
+
+def enqueue_event(event_type, src, body: bytes, tok: int = 0):
+    """把一条事件写入本地队列（与 hook wrapper 相同的入队格式），
+    由 drain_queue 统一转发——所有投递共享重试与保序（#031）"""
+    os.makedirs(QUEUE_DIR, exist_ok=True)
+    suffix = f"_t{tok}" if tok > 0 else ""
+    name = f"{event_type}_{src}_{random.randint(0, 10**9)}{suffix}.ev"
+    with open(os.path.join(QUEUE_DIR, name), "wb") as f:
+        f.write(body)
+
+
+def drain_queue():
+    """职责三(#030)：转发 hook 写下的本地事件队列到板子。
+
+    队列条目 = 文件名编码元数据 + 文件内容为原始 body：
+        <event>_<src>_<rand>[_t<tok>].ev
+    严格 FIFO：按 mtime 顺序发送；成功即删；4xx 毒条目立即删；
+    **首次网络失败立即停止本轮**（保序 + 防一轮被大量重试拖死），下轮从头重试；
+    条目过旧(>180s)自动放弃（状态事件重放无意义）。
+    """
+    import glob as _glob
+    files = _glob.glob(os.path.join(QUEUE_DIR, "*.ev"))
+    if not files:
+        return
+    try:
+        files.sort(key=lambda p: os.stat(p).st_mtime_ns)
+    except OSError:
+        pass
+    now = time.time()
+    for path in files[:30]:                     # 每轮上限，防突发洪峰
+        name = os.path.basename(path)
+        try:
+            if now - os.path.getmtime(path) > 180:
+                os.remove(path)                 # 太旧：状态事件重放无意义
+                log(f"队列条目过旧丢弃: {name}")
+                continue
+            parts = name[:-3].split("_")        # 去 .ev
+            if len(parts) < 3:
+                os.remove(path)
+                continue
+            ev, src = parts[0], parts[1]
+            tok = 0
+            for p in parts[2:]:
+                if p.startswith("t") and p[1:].isdigit():
+                    tok = int(p[1:])
+            with open(path, "rb") as f:
+                body = f.read()
+            board_event_raw(ev, src, body, tok)
+            os.remove(path)
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                os.remove(path)                 # 毒条目（板子拒收），删掉不重试
+                log(f"队列条目被拒({e.code})丢弃: {name}")
+            else:
+                log(f"队列发送失败({e.code})，本轮停止保序: {name}")
+                break                           # 5xx：网络/板子问题，停本轮
+        except Exception as e:
+            log(f"队列发送失败，本轮停止保序: {name} {type(e).__name__}")
+            break                               # FIFO 不破坏 + 本轮不被拖死
 
 
 def process_names():
@@ -172,18 +259,29 @@ def proc_rules():
 
 
 def main() -> int:
-    log("看门狗启动(v2: 进程巡检 + 批准加速)")
+    log("看门狗启动(v3: 队列转发 + 进程巡检 + 批准加速)")
     tailer = ZCodeLogTailer(ZCODE_LOG_GLOB)
     tick = 0
     while True:
         tick += 1
+        # 职责三：转发 hook 事件队列（每 1 秒，网络彻底移出 AI 关键路径 #030）
+        try:
+            drain_queue()
+        except Exception as e:
+            log(f"队列转发异常: {type(e).__name__}: {e}")
+
         # 职责二：批准/拒绝 -> 立即推 WORKING（每 1 秒）
         try:
             for rec in tailer.poll():
                 if rec["session"]:
-                    board_event("pre-tool-use", "zcode", rec["session"], rec["tool"])
+                    # 走队列而不是直连 POST：网络抖动时享受重试，
+                    # 否则推送丢失会让卡片卡在 APPROVE（#031）
+                    enqueue_event("pre-tool-use", "zcode", json.dumps({
+                        "session_id": rec["session"],
+                        "tool_name": rec["tool"],
+                    }).encode())
                     log(f"批准/拒绝已解决({rec['decision']} {rec['tool']}) "
-                        f"-> 推 WORKING {rec['session'][:12]}")
+                        f"-> 入队 WORKING {rec['session'][:12]}")
         except Exception as e:
             log(f"日志尾随异常: {type(e).__name__}: {e}")
 

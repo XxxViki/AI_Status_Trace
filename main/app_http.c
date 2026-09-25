@@ -35,7 +35,7 @@ static esp_err_t health_get(httpd_req_t *req)
 /* GET /state —— 调试用：灯效 + 会话表明细（id前8位/状态/无事件秒数） */
 static esp_err_t state_get(httpd_req_t *req)
 {
-    char body[512];
+    char body[1024];   /* 8会话 x ~90B = 720B, 512会截断成非法JSON */
     int n = snprintf(body, sizeof(body), "{\"lamp\":\"%s\",\"sessions\":%d,\"table\":",
                      ai_sessions_mode_name(ai_sessions_aggregate()), ai_sessions_count());
     n += ai_sessions_dump_json(body + n, sizeof(body) - n);
@@ -96,6 +96,8 @@ static esp_err_t events_post(httpd_req_t *req)
     char msg_tool[8] = "";
     char proj[16] = "";
     char msg_toolname[12] = "";
+    char sid_param[48] = {0};
+    char tool_param[16] = {0};
     int msg_tokens = 0;
     bool sid_is_unknown = true;
 
@@ -117,6 +119,10 @@ static esp_err_t events_post(httpd_req_t *req)
         if (httpd_query_key_value(query, "tok", tok_param, sizeof(tok_param)) == ESP_OK) {
             msg_tokens = atoi(tok_param);
         }
+        /* sid/tool: 看门狗完整解析后传入的权威值（#033 治本——
+         * Stop 类大载荷的 sessionId 可能在512字节截断线之后，板内扫描不到） */
+        httpd_query_key_value(query, "sid", sid_param, sizeof(sid_param));
+        httpd_query_key_value(query, "tool", tool_param, sizeof(tool_param));
         /* 工具来源：&src=claude / zcode（区分徽章） */
         char src_param[10] = {0};
         if (httpd_query_key_value(query, "src", src_param, sizeof(src_param)) == ESP_OK) {
@@ -197,6 +203,15 @@ static esp_err_t events_post(httpd_req_t *req)
             }
             proj[n] = '\0';
         }
+    }
+
+    /* query 传参优先（权威值），body 扫描作兜底 */
+    if (sid_param[0]) {
+        strlcpy(sid, sid_param, sizeof(sid));
+        sid_is_unknown = false;
+    }
+    if (tool_param[0]) {
+        strlcpy(msg_toolname, tool_param, sizeof(msg_toolname));
     }
 
     msg.event = ai_event_from_str(ev_str);

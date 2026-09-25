@@ -75,14 +75,18 @@ static lamp_mode_t session_lamp(const session_slot_t *s, int64_t now)
 
 static int mode_rank(lamp_mode_t m)
 {
+    /* 显示/聚合优先级（2026-09-26 与用户讨论定稿，见 #032）：
+     * 红色审批最急；绿闪排第二的依据是"时间稀缺性"——只有10秒窗口，
+     * 错过即消失；黄闪(等审批)持续存在且2分钟后自动升级为红回到第1位，
+     * 所以排在绿闪之后不会丢失。 */
     switch (m) {
-    case LAMP_RED_FLASH:     return 6;
-    case LAMP_YELLOW_FLASH:  return 5;
-    case LAMP_YELLOW_STEADY: return 4;
-    case LAMP_YELLOW_BREATH: return 3;
-    case LAMP_GREEN_FLASH:   return 2;
-    case LAMP_GREEN_STEADY:  return 1;
-    default:                 return 0;
+    case LAMP_RED_FLASH:     return 6;   /* 1. 审批晾超时 */
+    case LAMP_GREEN_FLASH:   return 5;   /* 2. 新鲜结果(10s窗口) */
+    case LAMP_YELLOW_FLASH:  return 4;   /* 3. 等审批(会自升级) */
+    case LAMP_YELLOW_STEADY: return 3;   /* 4. 心跳丢失 */
+    case LAMP_YELLOW_BREATH: return 2;   /* 5. 干活中 */
+    case LAMP_GREEN_STEADY:  return 1;   /* 6. 旧结果 */
+    default:                 return 0;   /* 7. 无动静 */
     }
 }
 

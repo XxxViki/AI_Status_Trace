@@ -430,18 +430,51 @@ static void draw_card(int idx, const ai_card_info_t *info, int64_t now,
     flush_region(x, y, x + CARD_W - 1, y + CARD_H - 1);
 }
 
-/* 头部：聚合状态点 + 标题 + 溢出计数 */
-static void draw_header(lamp_mode_t agg, int total, int shown, int64_t now)
+/* ---------- 头部：会话数 + 全员状态彩带（#032） ----------
+ *
+ * 设计（与用户讨论定稿）：
+ *   左：会话总数（一眼知道开了几个 AI）
+ *   右：彩带，每段一个会话(按优先级序)，颜色=状态
+ *       - 第 1 段(最高优先级)加宽(18px)且参与动画 = "远观信号"
+ *       - 显示中的前 3 段画满高(10px)，隐藏段画半高(6px) = 一眼看出被折叠的
+ *   去掉了旧圆点(与卡片1色条重复)和装饰文字 "AI STATUS"(浪费空间)
+ */
+#define MAX_RIBBON  8      /* 与会话表上限一致 */
+#define RIB_W_FIRST 18
+#define RIB_W_REST  14
+#define RIB_GAP     2
+#define RIB_RIGHT   6      /* 右边距 */
+
+/* 第 i 段彩带的 x 起点（左端），n=总段数。全/快路径共用保证几何一致 */
+static int ribbon_x(int n, int i)
+{
+    int total = RIB_W_FIRST + (n > 1 ? (n - 1) * (RIB_W_REST + RIB_GAP) : 0);
+    int x = LW - RIB_RIGHT - total;
+    if (i > 0) {
+        x += RIB_W_FIRST + RIB_GAP + (i - 1) * (RIB_W_REST + RIB_GAP);
+    }
+    return x;
+}
+
+/* 重绘头部整条（relayout 时调用）。all=全部会话(优先级序), n=总数, shown=显示中的数 */
+static void draw_header(const ai_card_info_t *all, int n, int shown, int64_t now)
 {
     fill_rect(0, 0, LW - 1, 17, COL_CARD);
-    uint16_t on = mode_color(agg);
-    uint16_t off = blend565(on, COL_CARD, 140);
-    fill_circle(11, 9, 6, mode_anim_color(agg, on, off, now));
-    draw_text(24, 5, "AI STATUS", 1, COL_TXT_DIM);
-    if (total > shown) {
-        char buf[8];
-        snprintf(buf, sizeof(buf), "+%d", total - shown);
-        draw_text(LW - 8 - text_w(buf, 1), 5, buf, 1, COL_TXT_DIM);
+
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%d SESSION%s", n, n == 1 ? "" : "S");
+    draw_text(6, 6, buf, 1, COL_TXT_DIM);
+
+    for (int i = 0; i < n && i < MAX_RIBBON; i++) {
+        uint16_t c = mode_color(all[i].lamp);
+        int h = (i < shown) ? 10 : 6;
+        int y0 = 9 - h / 2;                       /* 垂直居中于 18px 头部 */
+        int x = ribbon_x(n, i);
+        int w = (i == 0) ? RIB_W_FIRST : RIB_W_REST;
+        if (i == 0) {
+            c = mode_anim_color(all[i].lamp, c, blend565(c, COL_CARD, 140), now);
+        }
+        fill_rect(x, y0, x + w - 1, y0 + h - 1, c);
     }
     flush_region(0, 0, LW - 1, 17);
 }
@@ -472,7 +505,7 @@ static void display_task(void *arg)
     ai_event_msg_t msg;
     int64_t last_layout_ms = -10000;
     uint16_t last_card_anim[3] = { 0xFFFF, 0xFFFF, 0xFFFF };
-    uint16_t last_header_anim = 0xFFFF;
+    uint16_t last_ribbon_anim = 0xFFFF;
     lamp_mode_t last_mode = LAMP_OFF;
     int last_n = -1;
     bool force_relayout = true;              /* 开机画一次 */
@@ -492,38 +525,39 @@ static void display_task(void *arg)
             force_relayout = true;
         }
 
-        ai_card_info_t cards[3];
-        int n = ai_sessions_top(cards, 3);
-        int total = ai_sessions_count();
+        /* 导出全部会话（按优先级序）：前 3 张上卡片，其余进顶部彩带 */
+        ai_card_info_t all[8];
+        int n = ai_sessions_top(all, 8);
+        int shown = (n > 3) ? 3 : n;
         if (n != last_n) {
             last_n = n;
-            force_relayout = true;      /* 卡片增删立即重排 */
+            force_relayout = true;      /* 卡数变化立即重排 */
         }
 
         /* 刷新策略：每 500ms 全量重画卡片（时长/冒号跳秒），
-         * 中间的 50ms 动画帧只刷各卡自己的色条 + 头部状态点 */
+         * 中间的 50ms 动画帧只刷各卡色条 + 彩带第 1 段 */
         bool relayout = force_relayout || (now - last_layout_ms >= 500);
         if (relayout) {
             force_relayout = false;
             last_layout_ms = now;
-            for (int i = 0; i < n; i++) {
-                uint16_t c = card_anim_color(&cards[i], now);
-                draw_card(i, &cards[i], now, (int32_t)c);
+            for (int i = 0; i < shown; i++) {
+                uint16_t c = card_anim_color(&all[i], now);
+                draw_card(i, &all[i], now, (int32_t)c);
                 last_card_anim[i] = c;
             }
-            for (int i = n; i < 3; i++) {
+            for (int i = shown; i < 3; i++) {
                 int x = CARD_X0 + i * (CARD_W + CARD_GAP);
                 fill_rect(x, CARD_Y0, x + CARD_W - 1, CARD_Y0 + CARD_H - 1, COL_CARD);
                 flush_region(x, CARD_Y0, x + CARD_W - 1, CARD_Y0 + CARD_H - 1);
                 last_card_anim[i] = 0xFFFF;
             }
-            draw_header(agg, total, n, now);
-            last_header_anim = mode_anim_color(agg, mode_color(agg),
-                                               blend565(mode_color(agg), COL_CARD, 140), now);
+            draw_header(all, n, shown, now);
+            last_ribbon_anim = mode_anim_color(all[0].lamp, mode_color(all[0].lamp),
+                                                blend565(mode_color(all[0].lamp), COL_CARD, 140), now);
         } else {
             /* 每帧动画：每张卡各自的色条（working 呼吸 / 审批频闪） */
-            for (int i = 0; i < n; i++) {
-                uint16_t c = card_anim_color(&cards[i], now);
+            for (int i = 0; i < shown; i++) {
+                uint16_t c = card_anim_color(&all[i], now);
                 if (c != last_card_anim[i]) {
                     int bx = CARD_X0 + i * (CARD_W + CARD_GAP);
                     fill_rect(bx, CARD_Y0, bx + CARD_W - 1, CARD_Y0 + 2, c);
@@ -531,13 +565,16 @@ static void display_task(void *arg)
                     last_card_anim[i] = c;
                 }
             }
-            /* 头部状态点：只刷 13x13 小区域，不重绘文字 */
-            uint16_t hc = mode_anim_color(agg, mode_color(agg),
-                                          blend565(mode_color(agg), COL_CARD, 140), now);
-            if (hc != last_header_anim) {
-                fill_circle(11, 9, 6, hc);
-                flush_region(5, 3, 17, 15);
-                last_header_anim = hc;
+            /* 彩带第 1 段（最高优先级）：只刷 18x10 小区域 */
+            if (n > 0) {
+                uint16_t hc = mode_anim_color(all[0].lamp, mode_color(all[0].lamp),
+                                              blend565(mode_color(all[0].lamp), COL_CARD, 140), now);
+                if (hc != last_ribbon_anim) {
+                    int x = ribbon_x(n, 0);
+                    fill_rect(x, 4, x + RIB_W_FIRST - 1, 13, hc);
+                    flush_region(x, 4, x + RIB_W_FIRST - 1, 13);
+                    last_ribbon_anim = hc;
+                }
             }
         }
 

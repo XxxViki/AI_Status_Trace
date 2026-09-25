@@ -73,16 +73,28 @@ esp_err_t app_wifi_start(int timeout_ms)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_got_ip, NULL));
 
+    /* AP 锁定（#034）：本环境有两个同名 SSID 的 AP（双频/双路由），
+     * 不锁定时重连会挑到另一个网段(192.168.28.x)，PC(192.168.1.x)不可达。
+     * 锁定 BSSID = 确定性地连到正确的那台。
+     * 换路由器时改这里（Windows 查 BSSID：netsh wlan show networks mode=bssid）*/
+    static const uint8_t k_ap_bssid[6] = { 0x5c, 0xde, 0x34, 0xcd, 0x68, 0xae };
+
     wifi_config_t wifi_cfg = {
         .sta = {
             .ssid = CONFIG_AI_STATUS_WIFI_SSID,
             .password = CONFIG_AI_STATUS_WIFI_PASSWORD,
+            .bssid = { k_ap_bssid[0], k_ap_bssid[1], k_ap_bssid[2],
+                       k_ap_bssid[3], k_ap_bssid[4], k_ap_bssid[5] },
+            .bssid_set = true,
             .pmf_cfg = {
                 .capable = true,   /* 路由器要求 PMF(管理帧保护)时也能连 */
                 .required = false,
             },
         },
     };
+    ESP_LOGW(TAG, "锁定 AP: %02X:%02X:%02X:%02X:%02X:%02X",
+             k_ap_bssid[0], k_ap_bssid[1], k_ap_bssid[2],
+             k_ap_bssid[3], k_ap_bssid[4], k_ap_bssid[5]);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
