@@ -246,20 +246,20 @@ static void serial_cmd_task(void *arg)
 
 esp_err_t app_wifi_start(int timeout_ms)
 {
-    /* 配网标志位: 长按 BOOT 设置 → 本次启动直接进 SoftAP 配网 */
-    if (setup_flag_get()) {
-        ESP_LOGW(TAG, "Setup flag set: entering SoftAP setup mode");
-        app_wifi_start_setup_mode();
-        return ESP_OK;   /* 不可达 */
-    }
-
-    /* WiFi 驱动依赖 NVS（存校准数据），先初始化 */
+    /* NVS 初始化必须在 setup_flag_get 之前——否则标志读不到, 配网模式永远不触发(#068) */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    /* 配网标志位: 长按 BOOT 设置 → 本次启动直接进 SoftAP 配网 */
+    if (setup_flag_get()) {
+        ESP_LOGW(TAG, "Setup flag set: entering SoftAP setup mode");
+        app_wifi_start_setup_mode();
+        return ESP_OK;   /* 不可达 */
+    }
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());

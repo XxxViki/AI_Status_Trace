@@ -18,6 +18,7 @@
 #include "cJSON.h"
 #include "ai_state.h"
 #include "app_display.h"
+#include "app_wifi.h"
 #include "ai_sessions.h"
 #include "app_http.h"
 
@@ -345,6 +346,17 @@ static esp_err_t dbg_page_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /dbg/setup —— 调试用: 模拟长按 BOOT 触发配网(写标志+1秒后重启) */
+static esp_err_t dbg_setup_get(httpd_req_t *req)
+{
+    app_wifi_setup_flag_set();
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "setup mode armed, restarting in 1s", HTTPD_RESP_USE_STRLEN);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return ESP_OK;   /* 不可达 */
+}
+
 esp_err_t app_http_start(void)
 {
     httpd_handle_t server = NULL;
@@ -374,6 +386,8 @@ esp_err_t app_http_start(void)
     httpd_register_uri_handler(server, &stok);
     httpd_register_uri_handler(server, &dbgrow);
     httpd_register_uri_handler(server, &dbgpage);
+    static const httpd_uri_t dbgsetup = { .uri = "/dbg/setup", .method = HTTP_GET, .handler = dbg_setup_get };
+    httpd_register_uri_handler(server, &dbgsetup);
 
     ESP_LOGI(TAG, "HTTP 服务已启动，端口 %d", cfg.server_port);
     return ESP_OK;
