@@ -20,6 +20,7 @@
 /* 灯效模式（显示层关心的最终形态） */
 typedef enum {
     LAMP_OFF = 0,
+    LAMP_IDLE,               /* #070: 会话存在但无动作——显示 IDLE 卡 */
     LAMP_GREEN_STEADY,
     LAMP_GREEN_FLASH,
     LAMP_YELLOW_BREATH,

@@ -68,7 +68,9 @@ static lamp_mode_t session_lamp(const session_slot_t *s, int64_t now)
         return (age >= scaled(APPROVAL_ESCALATE_MS)) ? LAMP_RED_FLASH : LAMP_YELLOW_FLASH;
     case AI_STATE_DONE:
         return (age < scaled(GREEN_FLASH_MS)) ? LAMP_GREEN_FLASH : LAMP_GREEN_STEADY;
-    default:               /* IDLE：会话在但没动静，不产生注意力需求 */
+    case AI_STATE_IDLE:    /* #070: 会话存在但无动作——显示 IDLE 卡(用户要求) */
+        return LAMP_IDLE;
+    default:
         return LAMP_OFF;
     }
 }
@@ -86,6 +88,7 @@ static int mode_rank(lamp_mode_t m)
     case LAMP_YELLOW_BREATH: return 3;   /* 4. 干活中(#052: 活动会话优先上屏) */
     case LAMP_YELLOW_STEADY: return 2;   /* 5. 心跳丢失(不确定,低于活动会话) */
     case LAMP_GREEN_STEADY:  return 1;   /* 6. 旧结果 */
+    case LAMP_IDLE:          return 1;   /* 7. 空闲(#070: 和旧结果同级,都无行动需求) */
     default:                 return 0;   /* 7. 无动静 */
     }
 }

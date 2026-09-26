@@ -330,6 +330,7 @@ static const char *mode_word(lamp_mode_t m)
     case LAMP_RED_FLASH:     return "OVERDUE!";
     case LAMP_GREEN_FLASH:   return "DONE!";
     case LAMP_GREEN_STEADY:  return "DONE";
+    case LAMP_IDLE:          return "IDLE";   /* #070: 用户要求显示空闲状态 */
     default:                 return "";
     }
 }
@@ -341,6 +342,7 @@ static uint16_t mode_color(lamp_mode_t m)
     case LAMP_GREEN_FLASH:
     case LAMP_GREEN_STEADY:  return COL_GRN;
     case LAMP_YELLOW_STEADY: return COL_STUCK;    /* STUCK: 中性白常亮(与红黄绿全拉开) */
+    case LAMP_IDLE:          return COL_TXT_DIM;  /* IDLE: 暗灰 */
     case LAMP_OFF:           return COL_TXT_DIM;
     default:                 return COL_YEL;
     }
@@ -699,35 +701,22 @@ static uint16_t card_anim_color(const ai_card_info_t *info, int64_t now)
     return mode_anim_color(info->lamp, on, off, now);
 }
 
-/* ---------- 配网模式屏幕（#069）----------
- * 进入配网时显示 AP 信息；提交凭据后显示 SAVED。
- * s_setup_screen=true 时显示任务暂停正常渲染，专显配网状态。 */
+/* ---------- 配网模式屏幕（#069/#070）----------
+ * s_setup_screen=true 时显示任务暂停正常渲染。
+ * 配网屏幕由显示任务自己画（消除主任务/显示任务竞态#070）。 */
 static volatile bool s_setup_screen = false;
+static volatile int  s_setup_kind = 0;   /* 0=无 1=SETUP页 2=SAVED页 */
 
 void app_display_enter_setup(void)
 {
+    s_setup_kind = 1;
     s_setup_screen = true;
-    /* 清屏 */
-    for (int i = 0; i < PH * PW; i++) s_frame[i] = COL_BG;
-    fill_rect(0, 20, LW - 1, 55, COL_YEL);
-    draw_text_centered(LW / 2, 28, "SETUP MODE", 2, COL_BG);
-    draw_text_centered(LW / 2, 70, "1. Connect WiFi:", 1, COL_TXT);
-    draw_text_centered(LW / 2, 84, "AI-Status-Setup", 2, COL_TXT);
-    draw_text_centered(LW / 2, 106, "2. Password:", 1, COL_TXT);
-    draw_text_centered(LW / 2, 118, "12345678", 2, COL_TXT);
-    draw_text_centered(LW / 2, 140, "3. Open browser:", 1, COL_TXT);
-    draw_text_centered(LW / 2, 152, "192.168.4.1", 2, COL_GRN);
-    flush_all();
 }
 
 void app_display_show_saved(void)
 {
-    s_setup_screen = true;   /* 确保显示任务不覆盖 */
-    for (int i = 0; i < PH * PW; i++) s_frame[i] = COL_BG;
-    fill_rect(0, 40, LW - 1, 80, COL_GRN);
-    draw_text_centered(LW / 2, 50, "SAVED!", 3, COL_BG);
-    draw_text_centered(LW / 2, 100, "Restarting...", 2, COL_TXT);
-    flush_all();
+    s_setup_kind = 2;
+    s_setup_screen = true;
 }
 
 /* ---------- 主任务 ---------- */
@@ -779,8 +768,28 @@ static void display_task(void *arg)
     bool force_relayout = true;              /* 开机画一次 */
 
     for (;;) {
-        /* #069: 配网模式时暂停正常渲染（配网屏幕已由 enter_setup 画好） */
+        /* #070: 配网屏幕由显示任务自己画（在自身上下文，无竞态） */
         if (s_setup_screen) {
+            if (s_setup_kind == 1) {
+                /* SETUP MODE 页：黄条 + AP 信息 + IP */
+                for (int i = 0; i < PH * PW; i++) s_frame[i] = COL_BG;
+                fill_rect(0, 20, LW - 1, 55, COL_YEL);
+                draw_text_centered(LW / 2, 28, "SETUP MODE", 2, COL_BG);
+                draw_text_centered(LW / 2, 70, "1. Connect WiFi:", 1, COL_TXT);
+                draw_text_centered(LW / 2, 84, "AI-Status-Setup", 2, COL_TXT);
+                draw_text_centered(LW / 2, 106, "2. Password:", 1, COL_TXT);
+                draw_text_centered(LW / 2, 118, "12345678", 2, COL_TXT);
+                draw_text_centered(LW / 2, 140, "3. Open browser:", 1, COL_TXT);
+                draw_text_centered(LW / 2, 152, "192.168.4.1", 2, COL_GRN);
+                flush_all();
+            } else if (s_setup_kind == 2) {
+                /* SAVED 页：绿底 + 重启提示 */
+                for (int i = 0; i < PH * PW; i++) s_frame[i] = COL_BG;
+                fill_rect(0, 40, LW - 1, 80, COL_GRN);
+                draw_text_centered(LW / 2, 50, "SAVED!", 3, COL_BG);
+                draw_text_centered(LW / 2, 100, "Restarting...", 2, COL_TXT);
+                flush_all();
+            }
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
