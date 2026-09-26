@@ -49,9 +49,9 @@ static const char *TAG = "disp";
 #define COL_CLAUDE  RGB565(0xd9, 0x77, 0x57)   /* Anthropic 珊瑚色 */
 #define COL_ZCODE   RGB565(0x4e, 0x9e, 0xe8)   /* ZCode 蓝 */
 
-#define FRAME_MS    50
-#define BREATH_MS   1000
-#define FLASH_MS    333
+#define FRAME_MS    33     /* 30fps: 动画更连贯(#064) */
+#define BREATH_MS   1400     /* #064: 放慢呼吸更自然 */
+#define FLASH_MS    400      /* #064: 频闪放缓 */
 
 #define CARD_W      101
 #define CARD_H      136
@@ -308,7 +308,7 @@ static uint16_t mode_anim_color(lamp_mode_t m, uint16_t on, uint16_t off, int64_
     switch (m) {
     case LAMP_YELLOW_BREATH: {
         int phase100 = (int)((now % BREATH_MS) * 100 / BREATH_MS);
-        int level = 77 + (int)(23.0f * cosf(2.0f * 3.1415926f * phase100 / 100.0f));
+        int level = 81 + (int)(19.0f * cosf(2.0f * 3.1415926f * phase100 / 100.0f));  /* 62..100 更柔和 */
         return blend565(off, on, level * 255 / 100);
     }
     case LAMP_YELLOW_FLASH:
