@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define WIFI_CFG_SSID_MAX  33     /* 802.11 SSID 最长 32 字节 + NUL */
 #define WIFI_CFG_PASS_MAX  65     /* WPA2 密码最长 64 字节 + NUL */

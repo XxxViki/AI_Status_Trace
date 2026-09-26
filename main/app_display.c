@@ -24,6 +24,7 @@
 #include "ST7789.h"
 #include "ai_state.h"
 #include "ai_sessions.h"
+#include "app_wifi.h"
 #include "font5x7.h"
 #include "app_display.h"
 
@@ -742,6 +743,8 @@ static void display_task(void *arg)
     int64_t page_set_ms = 0;
     bool btn_prev = false;
     int64_t btn_last_ms = 0;
+    int64_t btn_press_start = 0;
+    bool btn_long_fired = false;
     bool force_relayout = true;              /* 开机画一次 */
 
     for (;;) {
@@ -784,8 +787,36 @@ static void display_task(void *arg)
             force_relayout = true;
         }
 
-        /* BOOT 键翻页（按下沿触发 + 去抖） */
+        /* BOOT 长按 3 秒 → 进配网模式（#067）：
+         * 屏幕显示"配网模式 AP:AI-Status-Setup", 重启后变热点 */
         bool btn = (gpio_get_level(BOOT_BTN_GPIO) == 0);
+        if (btn) {
+            if (btn_press_start == 0) {
+                btn_press_start = now;
+            } else if (now - btn_press_start > 3000 && !btn_long_fired) {
+                btn_long_fired = true;
+                ESP_LOGW(TAG, "BOOT 长按 3 秒 -> 进入配网模式");
+                /* 屏幕显示配网状态(帧缓冲直接画, 不走 LVGL) */
+                for (int i = 0; i < PH * PW; i++) {
+                    s_frame[i] = COL_BG;
+                }
+                /* 逻辑坐标: 居中大字 SETUP MODE + AP 名 + IP */
+                s_clip_x0 = 0; s_clip_x1 = LW - 1;
+                fill_rect(0, 30, LW - 1, 60, COL_YEL);
+                draw_text_centered(LW / 2, 36, "SETUP MODE", 2, COL_BG);
+                draw_text_centered(LW / 2, 80, "AP: AI-Status-Setup", 1, COL_TXT);
+                draw_text_centered(LW / 2, 100, "pass: 12345678", 1, COL_TXT);
+                draw_text_centered(LW / 2, 120, "http://192.168.4.1", 1, COL_GRN);
+                flush_all();
+                app_wifi_setup_flag_set();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                esp_restart();
+            }
+        } else {
+            btn_press_start = 0;
+            btn_long_fired = false;
+        }
+        btn_prev = btn;
         if (btn && !btn_prev && now - btn_last_ms > BTN_DEBOUNCE_MS) {
             btn_last_ms = now;
             page = (page + 1) % pages;
