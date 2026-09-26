@@ -19,12 +19,12 @@
 #define MAX_SESSIONS 8
 
 /* 判定阈值（毫秒），会被 time_scale 缩放（仅用于测试加速） */
-#define HEARTBEAT_LOST_MS   (60 * 1000)       /* working 无心跳 → 黄常亮(不确定) */
+#define HEARTBEAT_LOST_MS   (180 * 1000)      /* working 无心跳 → 黄常亮(#052: 60s太急,长思考误判) */
 #define APPROVAL_ESCALATE_MS (2 * 60 * 1000)   /* 等审批 → 升级红闪 */
 #define APPROVAL_GIVEUP_MS  (10 * 60 * 1000)   /* 等审批无人理 → 降级完成（红闪封顶10分钟）*/
 #define GREEN_FLASH_MS      (10 * 1000)        /* 绿闪衰减为绿常亮 */
-#define WORKING_KILL_MS  (5 * 60 * 1000)    /* working 无心跳5分钟 → 疑似被杀,直接清卡片 */
-#define GHOST_TIMEOUT_MS    (10 * 60 * 1000)   /* 非工作态无事件→清理(进程被杀的卡片10分钟内消失) */
+#define WORKING_KILL_MS  (30 * 60 * 1000)   /* #054: 5min会误杀长思考会话;活进程由看门狗负责,此值只兜底ZCode关标签 */
+#define GHOST_TIMEOUT_MS    (60 * 60 * 1000)   /* #054: 10min会误清"空闲但存活"的会话;进程被杀由看门狗即时清 */
 
 static const char *TAG = "sessions";
 
@@ -83,8 +83,8 @@ static int mode_rank(lamp_mode_t m)
     case LAMP_RED_FLASH:     return 6;   /* 1. 审批晾超时 */
     case LAMP_GREEN_FLASH:   return 5;   /* 2. 新鲜结果(10s窗口) */
     case LAMP_YELLOW_FLASH:  return 4;   /* 3. 等审批(会自升级) */
-    case LAMP_YELLOW_STEADY: return 3;   /* 4. 心跳丢失 */
-    case LAMP_YELLOW_BREATH: return 2;   /* 5. 干活中 */
+    case LAMP_YELLOW_BREATH: return 3;   /* 4. 干活中(#052: 活动会话优先上屏) */
+    case LAMP_YELLOW_STEADY: return 2;   /* 5. 心跳丢失(不确定,低于活动会话) */
     case LAMP_GREEN_STEADY:  return 1;   /* 6. 旧结果 */
     default:                 return 0;   /* 7. 无动静 */
     }

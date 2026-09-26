@@ -1,4 +1,6 @@
 #include "ST7789.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <stdlib.h>
 #include "esp_rom_sys.h"
 #include "freertos/idf_additions.h"
@@ -8,6 +10,25 @@
 static const char *TAG_LCD = "WS_LCD";
 
 esp_lcd_panel_handle_t panel_handle = NULL;
+
+/* #051: SPI 传输完成信号量——draw_bitmap 是异步排队(见 IDF 源码 tx_color),
+ * 共享传输缓冲必须等上一次传输真正完成后再复用, 否则屏幕出现重复/残缺内容 */
+static SemaphoreHandle_t s_flush_sem = NULL;
+
+static bool lcd_color_trans_done_cb(esp_lcd_panel_io_handle_t io,
+                                    esp_lcd_panel_io_event_data_t *edata, void *ctx)
+{
+    BaseType_t hp = pdFALSE;
+    xSemaphoreGiveFromISR((SemaphoreHandle_t)ctx, &hp);
+    return hp == pdTRUE;
+}
+
+void LCD_WaitFlushDone(void)
+{
+    if (s_flush_sem != NULL) {
+        xSemaphoreTake(s_flush_sem, pdMS_TO_TICKS(200));
+    }
+}
 
 typedef enum {
     BUS_OWNER_NONE = 0,
@@ -101,6 +122,10 @@ void BK_Light(uint8_t Light)
 // end Backlight program
 
 esp_err_t LCD_Init(void){
+    if (s_flush_sem == NULL) {
+        s_flush_sem = xSemaphoreCreateBinary();
+        xSemaphoreGive(s_flush_sem);      /* 初始为"空闲" */
+    }
     switch_bus_to_lcd();
     ESP_ERROR_CHECK(lcd_prepare_exio_lines());
     ESP_LOGI(TAG_LCD, "Initialize SPI bus");
@@ -119,8 +144,8 @@ esp_err_t LCD_Init(void){
         .lcd_param_bits = EXAMPLE_LCD_PARAM_BITS,
         .spi_mode = 0,
         .trans_queue_depth = 4,
-        .on_color_trans_done = NULL,
-        .user_ctx = NULL,
+        .on_color_trans_done = lcd_color_trans_done_cb,
+        .user_ctx = s_flush_sem,   /* #051: 完成回调给此信号量 */
     };
     ESP_LOGI(TAG_LCD, "SPI pclk_hz=%u", (unsigned int)io_config.pclk_hz);
     // Attach the LCD to the SPI bus

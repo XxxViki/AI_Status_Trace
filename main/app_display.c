@@ -118,12 +118,29 @@ static void flush_region(int x0, int y0, int x1, int y1)
                  (int)(sizeof(s_flush_buf) / sizeof(uint16_t)));
         return;
     }
+    /* #051: draw_bitmap 异步排队——复用共享缓冲前必须等上一次传输完成，
+     * 否则屏幕出现"重复/残缺"（单卡两分片背靠背时必现） */
+    LCD_WaitFlushDone();
     for (int r = 0; r < h; r++) {
         memcpy(&s_flush_buf[r * w], &s_frame[(phys_y0 + r) * PW + phys_x0],
                w * sizeof(uint16_t));
     }
     esp_lcd_panel_draw_bitmap(panel_handle, phys_x0, phys_y0,
                               phys_x1 + 1, phys_y1 + 1, s_flush_buf);
+}
+
+/* 分段刷新（#049）：逻辑宽超过 160px 的区域自动切片——单卡铺满后转置区达
+ * 136x312=42432 超过渡缓冲；每片 <=160px 逻辑宽(转置 136x160=21760)可安全发送 */
+static void flush_region_auto(int x0, int y0, int x1, int y1)
+{
+    const int MAXW = 160;
+    for (int x = x0; x <= x1; x += MAXW) {
+        int xe = x + MAXW - 1;
+        if (xe > x1) {
+            xe = x1;
+        }
+        flush_region(x, y0, xe, y1);
+    }
 }
 
 static void flush_all(void)
@@ -465,10 +482,7 @@ static void layout_slots(int n)
         return;
     }
     const int margin = 4, gap = 4;
-    int w = (LW - 2 * margin - (n - 1) * gap) / n;
-    if (w > 160) {
-        w = 160;                     /* 单卡过宽内容会散 */
-    }
+    int w = (LW - 2 * margin - (n - 1) * gap) / n;   /* #049: 单卡铺满,不再限宽 */
     int total = n * w + (n - 1) * gap;
     int x0 = (LW - total) / 2;
     for (int i = 0; i < n && i < 3; i++) {
@@ -525,7 +539,7 @@ static void draw_card(int idx, const ai_card_info_t *info, int64_t now,
         draw_text_centered(x + cw / 2, y + 112, info->last_tool, 1, COL_TXT_DIM);
     }
 
-    flush_region(x, y, x + cw - 1, y + CARD_H - 1);   /* #048: 参数化后必须用 cw */
+    flush_region_auto(x, y, x + cw - 1, y + CARD_H - 1);   /* #048/#049: 用 cw + 自动分段 */
 }
 
 /* ---------- 头部：会话数 + 全员 mini-logo 彩带（#035） ----------
@@ -654,7 +668,8 @@ static void draw_header(const ai_card_info_t *all, int n, int shown,
 
     char buf[48];
     if (pages > 1) {
-        snprintf(buf, sizeof(buf), "%d SESSIONS  %d/%d", n, page + 1, pages);
+        /* #053: "4 SESSIONS 1/2" 会被误读成"4个页面"——改成 P of M 更明确 */
+        snprintf(buf, sizeof(buf), "%d SESSIONS   P%d OF %d", n, page + 1, pages);
     } else {
         snprintf(buf, sizeof(buf), "%d SESSION%s", n, n == 1 ? "" : "S");
     }

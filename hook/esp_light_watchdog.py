@@ -89,6 +89,9 @@ def board_event_raw(event_type, src, body: bytes, tok: int = 0):
             url += f"&tool={tool}"
     except Exception:
         pass
+    if not sid:
+        # 捉现行(#053): 没有 session id 的事件会落进板子的 "?" 桶(幽灵卡)
+        log(f"无sid事件: ev={event_type} src={src} body[:90]={body[:90]!r}")
     if tok > 0:
         url += f"&tok={tok}"
     req = urllib.request.Request(url, data=body,
@@ -108,7 +111,8 @@ def enqueue_event(event_type, src, body: bytes, tok: int = 0):
 
 
 CLAUDE_PROJ_GLOB = os.path.join(os.path.expanduser("~"), ".claude", "projects", "*", "*.jsonl")
-_tok_state = {}   # path -> [offset, last_tok, pending_bytes]
+_tok_state = {}   # path -> [offset, last_tok, pending_bytes, recreate_at]
+_claude_recreate_at = 0.0   # #054: claude 卡重建限流
 
 
 def claude_token_watch():
@@ -130,7 +134,8 @@ def claude_token_watch():
         sid = os.path.basename(path)[:-6]          # 去 .jsonl
         st = _tok_state.get(path)
         if st is None:
-            st = [max(0, size - 65536), 0, b""]    # [偏移, 已推送值, 半行缓冲]
+            # [偏移, 已推送值, 半行缓冲, 上次补发重建时间]
+            st = [max(0, size - 65536), 0, b"", 0.0, 0]   # [偏移,已推送,半行,重建时间,已知值]
             _tok_state[path] = st
         if size < st[0]:                           # 文件被重写/截断
             st[0] = 0
@@ -146,7 +151,7 @@ def claude_token_watch():
         data = st[2] + chunk
         *lines, st[2] = data.split(b"\n")
         st[0] = size
-        tok = st[1]
+        tok = st[4]                          # 已知最新值(独立于"已推送值")
         for raw in lines:
             raw = raw.strip()
             if not raw.startswith(b"{"):
@@ -165,16 +170,28 @@ def claude_token_watch():
                      + int(u.get("cache_creation_input_tokens") or 0))
                 if t > 0:
                     tok = t                          # 保留最后一个非零
-        if tok > 0 and tok != st[1]:
-            st[1] = tok
+        if tok > 0:
+            st[4] = tok
+        if st[4] > 0 and st[4] != st[1]:     # known != pushed -> 推送(失败保持-1下轮重试)
+            tok = st[4]
             try:
                 url = f"{BOARD}/sessions/tok?sid={sid}&tok={tok}"
                 req = urllib.request.Request(url, data=b"{}",
                                              headers={"Content-Type": "application/json"})
                 with opener().open(req, timeout=2) as r:
                     resp = json.loads(r.read())
-                if not resp.get("updated"):
+                if resp.get("updated"):
+                    st[1] = tok    # 推送成功:记录已推送值
+                else:
                     st[1] = -1     # 板上暂无此卡(未建立/已被清):下次强制重推
+                    # #054: 转录文件活跃说明会话活着——板上却没有卡(事件丢失或被误清)
+                    # → 补发 session-start 重建, 限流 60s 防刷屏
+                    now2 = time.time()
+                    if now2 - st[3] > 60:
+                        st[3] = now2
+                        enqueue_event("session-start", "claude",
+                                      json.dumps({"session_id": sid}).encode())
+                        log(f"板上无卡, 补发 session-start 重建 {sid[:12]}")
             except Exception:
                 pass
     # 状态表清理：防长跑后无限增长
@@ -319,6 +336,22 @@ def proc_rules():
     cards = st.get("table", [])
     claude_cards = [c for c in cards if c.get("tool") == "claude"]
     zcode_cards = [c for c in cards if c.get("tool") == "zcode"]
+
+    # #054: Claude 进程在跑但板上没有 claude 卡（事件丢失/被误清）→ 用最近活跃的
+    # 转录文件重建卡（文件名即权威会话 id）。只重建不删除，安全。限流 60s。
+    global _claude_recreate_at
+    if claude_n > 0 and not claude_cards:
+        now2 = time.time()
+        if now2 - _claude_recreate_at > 60:
+            _claude_recreate_at = now2
+            import glob as _g
+            files = _g.glob(CLAUDE_PROJ_GLOB)
+            if files:
+                newest = max(files, key=os.path.getmtime)
+                sid = os.path.basename(newest)[:-6]
+                enqueue_event("session-start", "claude",
+                              json.dumps({"session_id": sid}).encode())
+                log(f"claude 进程 {claude_n} 个但无卡 -> 重建最近会话 {sid[:12]}")
 
     # 防护：只清"安静至少 10 秒"的卡
     quiet = [c for c in claude_cards if c.get("idle_s", 0) >= 10]

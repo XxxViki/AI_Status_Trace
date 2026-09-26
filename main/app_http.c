@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
+#include "esp_system.h"
 #include "cJSON.h"
 #include "ai_state.h"
 #include "app_display.h"
@@ -36,8 +37,9 @@ static esp_err_t health_get(httpd_req_t *req)
 static esp_err_t state_get(httpd_req_t *req)
 {
     char body[1024];   /* 8会话 x ~90B = 720B, 512会截断成非法JSON */
-    int n = snprintf(body, sizeof(body), "{\"lamp\":\"%s\",\"sessions\":%d,\"table\":",
-                     ai_sessions_mode_name(ai_sessions_aggregate()), ai_sessions_count());
+    int n = snprintf(body, sizeof(body), "{\"lamp\":\"%s\",\"sessions\":%d,\"heap\":%u,\"table\":",
+                     ai_sessions_mode_name(ai_sessions_aggregate()), ai_sessions_count(),
+                     (unsigned)esp_get_free_heap_size());
     n += ai_sessions_dump_json(body + n, sizeof(body) - n);
     snprintf(body + n, sizeof(body) - n, "}");
     httpd_resp_set_type(req, "application/json");
@@ -311,9 +313,17 @@ static esp_err_t dbg_row_get(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad y");
         return ESP_FAIL;
     }
+    char step_s[8] = {0};
+    int step = 2;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "step", step_s, sizeof(step_s));
+    }
+    if (step_s[0] == '1') {
+        step = 1;    /* 逐像素(OCR 小字用) */
+    }
     static char out[320 * 5 + 8];
     int o = 0;
-    for (int lx = 0; lx < 320 && o < (int)sizeof(out) - 8; lx += 2) {
+    for (int lx = 0; lx < 320 && o < (int)sizeof(out) - 8; lx += step) {
         o += snprintf(out + o, sizeof(out) - o, "%04X", app_display_pixel(lx, ly));
     }
     httpd_resp_set_type(req, "text/plain");

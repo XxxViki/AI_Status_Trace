@@ -35,4 +35,5 @@ void switch_bus_to_lcd(void);
 
 void BK_Light(uint8_t Light);                   // Call this function to adjust the brightness of the backlight. The value of the parameter Light ranges from 0 to 100
 esp_err_t LCD_Init(void);                     // Call this function to initialize the screen (must be called in the main function) !!!!!
+void LCD_WaitFlushDone(void);                 // #051: draw_bitmap 异步排队; 复用传输缓冲前必须等上一次完成                     // Call this function to initialize the screen (must be called in the main function) !!!!!
 esp_err_t spi_bus_init(void);
