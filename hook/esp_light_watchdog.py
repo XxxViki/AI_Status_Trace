@@ -355,12 +355,33 @@ def proc_rules():
                 sid = os.path.basename(f)[:-6]
                 enqueue_event("session-start", "claude",
                               json.dumps({"session_id": sid}).encode())
-                # #060: 紧跟 stop——重建卡立即置 DONE(绿), 而非 IDLE。
-                # 活会话的下一个真实事件马上覆盖为 WORKING/ERROR;
-                # 死会话的绿卡安静 60min 后自然老化, 语义正确。
-                enqueue_event("stop", "claude",
+                # #062: 按转录尾部推断真实状态——不要再无脑发 stop(置DONE)。
+                # 最后 assistant 消息含 tool_use = 等审批/执行中 → ERROR(红闪/黄闪);
+                # 纯 text = 回合完成 → DONE(绿)。卡状态与电脑实况一致。
+                infer = "stop"
+                try:
+                    with open(f, "rb") as fh:
+                        fh.seek(max(0, os.path.getsize(f) - 65536))
+                        tail_lines = fh.read().decode("utf-8", "replace").split("\n")
+                    for raw in reversed(tail_lines):
+                        raw = raw.strip()
+                        if not raw.startswith(b"{"):
+                            continue
+                        obj = json.loads(raw)
+                        if obj.get("type") != "assistant":
+                            continue
+                        msg = obj.get("message", {})
+                        c = msg.get("content")
+                        kinds = [i.get("type") for i in c
+                                 if isinstance(i, dict)] if isinstance(c, list) else []
+                        infer = ("permission-request" if "tool_use" in kinds
+                                 else "stop")
+                        break
+                except Exception:
+                    pass
+                enqueue_event(infer, "claude",
                               json.dumps({"session_id": sid}).encode())
-                log(f"claude 进程在但无卡 -> 重建会话 {sid[:12]} (start+stop=DONE)")
+                log(f"claude 无卡 -> 重建 {sid[:12]} 恢复状态={infer} (#062)")
 
     # 防护：只清"安静至少 10 秒"的卡
     quiet = [c for c in claude_cards if c.get("idle_s", 0) >= 10]
