@@ -353,7 +353,12 @@ def proc_rules():
                 sid = os.path.basename(f)[:-6]
                 enqueue_event("session-start", "claude",
                               json.dumps({"session_id": sid}).encode())
-                log(f"claude 进程在但无卡 -> 重建活跃会话 {sid[:12]}")
+                # #060: 紧跟 stop——重建卡立即置 DONE(绿), 而非 IDLE。
+                # 活会话的下一个真实事件马上覆盖为 WORKING/ERROR;
+                # 死会话的绿卡安静 60min 后自然老化, 语义正确。
+                enqueue_event("stop", "claude",
+                              json.dumps({"session_id": sid}).encode())
+                log(f"claude 进程在但无卡 -> 重建会话 {sid[:12]} (start+stop=DONE)")
 
     # 防护：只清"安静至少 10 秒"的卡
     quiet = [c for c in claude_cards if c.get("idle_s", 0) >= 10]
