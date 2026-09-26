@@ -117,14 +117,31 @@ def main():
 
     # 14.0s: 清屏
     at(14.0, "⑨ 清屏")
-    ev("session-end", "demo-1-w1")
-    ev("session-end", "demo-2-a1")
+    # #058: 清理清单从"手抄会话名"改为"逐个已知会话 + 断言板上无 demo-* 残留"
+    ALL_DEMO = ["demo-1-w1", "demo-2-a1", "demo-3-d1", "demo-4-w2"]
+    for sid in ALL_DEMO:
+        ev("session-end", sid)
     post("/events?event_type=pre-tool-use&ts=1", {"session_id": "ts-rst"})
     post("/events?event_type=session-end", {"session_id": "ts-rst"})
 
     elapsed = time.time() - t0
     print(f"\n  ✅ 演示完成 ({elapsed:.1f}s)")
-    print("  板上已清空, ts 已恢复")
+
+    # 断言: 板上不允许残留任何 demo-* 卡（#058 用户要求：测试完顺手清）
+    time.sleep(1.5)
+    st = post("/state")
+    if st:
+        leftover = [c["id"] for c in json.loads(st)["table"]
+                    if c["id"].startswith("demo-")]
+        if leftover:
+            for sid in leftover:
+                ev("session-end", sid)
+            time.sleep(1)
+            st = post("/state")
+            leftover = [c["id"] for c in json.loads(st)["table"]
+                        if c["id"].startswith("demo-")]
+        print(f"  残留检查: {'干净 ✓' if not leftover else '仍有残留 ' + str(leftover)}")
+    print("  ts 已恢复")
 
 
 if __name__ == "__main__":
