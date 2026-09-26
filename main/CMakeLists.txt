@@ -5,6 +5,7 @@ idf_component_register(
         "ai_state.c"
         "ai_sessions.c"
         "app_wifi.c"
+        "wifi_config.c"
         "app_http.c"
         "app_display.c"
     INCLUDE_DIRS "."
