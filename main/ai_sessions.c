@@ -29,7 +29,8 @@
 static const char *TAG = "sessions";
 
 typedef struct {
-    char       session_id[40];
+    char       session_id[48];   /* #079: ZCode 的 sess_+UUID=41字符,40会截断
+                                  * (截断后 /sessions/tok 全长前缀匹配必失败) */
     char       tool[8];
     char       project[32];   /* #038 扩容 */
     char       last_tool[12];  /* 最近调用的工具（Bash/Edit…） */
@@ -44,6 +45,7 @@ typedef struct {
 
 static session_slot_t s_slots[MAX_SESSIONS];
 static int s_time_scale = 1;
+static int64_t s_ts_set_ms = 0;             /* ts 设置时刻（Q10：5 分钟自动复位） */
 static bool s_dirty = false;          /* 有变更待持久化 */
 
 static int64_t now_ms(void)
@@ -110,7 +112,13 @@ void ai_sessions_set_time_scale(int scale)
         scale = 120;
     }
     s_time_scale = scale;
-    ESP_LOGW(TAG, "时间缩放 x%d（仅测试用）", s_time_scale);
+    s_ts_set_ms = now_ms();   /* Q10: 记录设置时刻，tick 里 5 分钟后自动复位 */
+    ESP_LOGW(TAG, "时间缩放 x%d（仅测试用，5分钟后自动复位）", s_time_scale);
+}
+
+int ai_sessions_time_scale(void)
+{
+    return s_time_scale;
 }
 
 static session_slot_t *find_session(const char *sid)
@@ -160,12 +168,10 @@ void ai_sessions_on_event(const ai_event_msg_t *msg)
                 && msg->project[0] && strcmp(s_slots[i].project, msg->project) == 0) {
                 ESP_LOGW(TAG, "同项目新会话顶掉旧卡 %.20s", s_slots[i].session_id);
                 s_slots[i].used = false;
+                s_dirty = true;   /* Q11: 去重也改了表，必须置脏（原先被无条件置脏掩盖） */
             }
         }
-        s = alloc_slot();
-        if (s == NULL) {
-            return;
-        }
+        s = alloc_slot();   /* 空闲槽优先，表满驱逐最旧——永不返回 NULL(Q11) */
         memset(s, 0, sizeof(*s));   /* 槽位卫生：新住户入住前彻底清空旧字段(#026)。
                                      * 漏此行时 tokens/last_tool 等会继承前任住户的值
                                      * （zcode 卡显示别的会话的 token 就是这么来的） */
@@ -193,7 +199,8 @@ void ai_sessions_on_event(const ai_event_msg_t *msg)
     if (msg->project[0] && !s->project[0]) {
         strlcpy(s->project, msg->project, sizeof(s->project));
     }
-    s_dirty = true;
+    s_dirty = true;   /* last_event_ms 每个事件都推进、也要落盘；
+                       * 逐条写 NVS 的风险由 maybe_save 的 30s 节流兜住（Q04） */
     if (is_new) {
         s->started_ms = now_ms();
         s->state_since_ms = now_ms();
@@ -206,6 +213,12 @@ void ai_sessions_on_event(const ai_event_msg_t *msg)
 void ai_sessions_tick(void)
 {
     int64_t now = now_ms();
+    /* Q10: ts 是排障用的测试加速参数，曾全局粘滞——测完不复位会让阈值
+     * 一直除以 N（"卡片莫名消失"极易被误判成别的原因，#014 就是这么来的） */
+    if (s_time_scale != 1 && now - s_ts_set_ms >= 5 * 60 * 1000) {
+        s_time_scale = 1;
+        ESP_LOGW(TAG, "时间缩放 5 分钟到期，自动复位 x1");
+    }
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!s_slots[i].used) {
             continue;
@@ -221,6 +234,8 @@ void ai_sessions_tick(void)
              * 红闪封顶10分钟后降级完成——红灯警示性强，不能无限期占用（#018） */
             s_slots[i].state = AI_STATE_DONE;
             s_slots[i].state_since_ms = now;
+            s_slots[i].last_event_ms = now;   /* Q12: 推进基准，降级后的 DONE 按新的超时窗口走 */
+            s_dirty = true;
             ESP_LOGW(TAG, "会话 %.20s 审批等待超时，降级完成", s_slots[i].session_id);
         } else if (s_slots[i].state != AI_STATE_WORKING && age >= scaled(GHOST_TIMEOUT_MS)) {
             ESP_LOGW(TAG, "幽灵会话 %.20s 超时清理", s_slots[i].session_id);
@@ -258,27 +273,62 @@ int ai_sessions_count(void)
     return n;
 }
 
+/* 按工具聚合：tokens 求和（当前上下文合计）+ 会话数（#077 统计页用） */
+void ai_sessions_tool_stats(const char *tool, int64_t *tokens, int *count)
+{
+    int64_t sum = 0;
+    int c = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (s_slots[i].used && strcmp(s_slots[i].tool, tool) == 0) {
+            sum += s_slots[i].tokens;
+            c++;
+        }
+    }
+    *tokens = sum;
+    *count = c;
+}
+
 int ai_sessions_dump_json(char *buf, int buflen)
 {
     int64_t now = now_ms();
     int off = 0;
-    off += snprintf(buf + off, buflen - off, "[");
-    for (int i = 0; i < MAX_SESSIONS && off < buflen - 48; i++) {
+    if (buflen < 4) {
+        return 0;
+    }
+    off += snprintf(buf, buflen, "[");
+    for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!s_slots[i].used) {
             continue;
+        }
+        /* Q01: 条目先在局部缓冲整条格式化，放得下才拼入。
+         * 旧写法直接 snprintf 进目标缓冲再累加返回值——被截断时返回的是
+         * "本应写入"的长度，off 一路冲过 buflen，收尾的 "]" 以负长度转
+         * size_t 巨值越界写（8 会话满编 + 项目名>=26B + token 7 位可触发，
+         * 撞的是 httpd 任务栈）。整条放入还保证任何几何下 /state 都是合法 JSON。 */
+        char entry[160];   /* 条目物理上限 ~131B（字段上限逐项相加），160 留余量 */
+        int w = snprintf(entry, sizeof(entry),
+                         "{\"id\":\"%.8s\",\"tool\":\"%s\",\"proj\":\"%s\",\"state\":\"%s\",\"tok\":%ld,\"idle_s\":%lld}",
+                         s_slots[i].session_id,
+                         s_slots[i].tool[0] ? s_slots[i].tool : "?",
+                         s_slots[i].project[0] ? s_slots[i].project : "?",
+                         ai_state_name(s_slots[i].state),
+                         (long)s_slots[i].tokens,
+                         (long long)((now - s_slots[i].last_event_ms) / 1000));
+        if (w >= (int)sizeof(entry)) {
+            w = (int)sizeof(entry) - 1;   /* 字段上限内不会发生，保险 */
+        }
+        /* 需要：条目 + 可选逗号 + "]" + NUL */
+        if (w + (off > 1 ? 1 : 0) + 2 > buflen - off) {
+            break;   /* 放不下就到此为止，绝不写半条 */
         }
         if (off > 1) {
             buf[off++] = ',';
         }
-        off += snprintf(buf + off, buflen - off,
-                        "{\"id\":\"%.8s\",\"tool\":\"%s\",\"proj\":\"%s\",\"state\":\"%s\",\"tok\":%ld,\"idle_s\":%lld}",
-                        s_slots[i].session_id,
-                        s_slots[i].tool[0] ? s_slots[i].tool : "?",
-                        s_slots[i].project[0] ? s_slots[i].project : "?",
-                        ai_state_name(s_slots[i].state),
-                        (long)s_slots[i].tokens,
-                        (long long)((now - s_slots[i].last_event_ms) / 1000));
+        memcpy(buf + off, entry, (size_t)w);
+        off += w;
     }
+    /* 尾部 "]" 计入返回值——调用方(state_get)要在 off 处接着拼 "}"，
+     * 漏加会让 "}" 盖住 "]"（上板实测：响应以 }} 结尾、缺 ]） */
     off += snprintf(buf + off, buflen - off, "]");
     return off;
 }
@@ -349,23 +399,33 @@ int ai_sessions_top(ai_card_info_t *out, int max)
 
 typedef struct __attribute__((packed)) {
     uint8_t used, state;
-    char    id[40], tool[8], proj[32], last_tool[12];
+    char    id[48], tool[8], proj[32], last_tool[12];   /* id 扩到48(#079),版本升5 */
     int32_t tokens;
     int64_t started_ms, state_since_ms, last_event_ms;
 } slot_blob_t;
 
 void ai_sessions_maybe_save(void)
 {
+    /* Q04: 事件流（pre/post-tool-use 几秒一个）不该逐条整表写 NVS——
+     * 一次写 ~842B ≈ 29 个 entry，约每 4 次写满一页触发一次擦除（flash 寿命），
+     * 且 commit 期间的擦除可阻塞显示任务几十 ms（掉帧）。
+     * 30s 节流的取舍：停电丢最近 30s 的会话表——相对 #023 要解决的
+     * "活会话被误杀"，这点丢失是可接受的。s_dirty 保持置位，窗口一到仍会写。 */
+    static int64_t s_last_save_ms;
     if (!s_dirty) {
         return;
     }
+    if (now_ms() - s_last_save_ms < 30000) {
+        return;
+    }
+    s_last_save_ms = now_ms();
     s_dirty = false;
     nvs_handle_t h;
     if (nvs_open("ai_status", NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
     uint8_t buf[9 + 1 + sizeof(slot_blob_t) * MAX_SESSIONS];
-    buf[0] = 4;   /* blob 版本: 结构/语义变更必须递增,旧版直接废弃(#024/#026/#038) */
+    buf[0] = 5;   /* blob 版本: 结构/语义变更必须递增,旧版直接废弃(#024/#026/#038/#079 id扩容) */
     int64_t up = now_ms();
     memcpy(buf + 1, &up, 8);
     uint8_t n = 0;
@@ -401,7 +461,7 @@ void ai_sessions_load(void)
     uint8_t buf[9 + 1 + sizeof(slot_blob_t) * MAX_SESSIONS];
     size_t len = sizeof(buf);
     if (nvs_get_blob(h, "sessions", buf, &len) != ESP_OK || len < 10
-        || buf[0] != 4) {
+        || buf[0] != 5) {
         /* 版本不符(结构已变更)或无数据: 废弃旧 blob,干净起步(#024) */
         nvs_erase_key(h, "sessions");
         nvs_commit(h);
@@ -412,21 +472,28 @@ void ai_sessions_load(void)
     memcpy(&saved_up, buf + 1, 8);
     int64_t delta = now_ms() - saved_up;   /* 跨重启的时间平移量 */
     uint8_t n = buf[9];
+    if (n > MAX_SESSIONS || len < 10 + (size_t)n * sizeof(slot_blob_t)) {
+        /* Q06: n 或总长越界 = blob 损坏（掉电打断写等）。按无数据起步——
+         * 拿坏 n 当循环上限会越过 842B 栈缓冲一路读下去 */
+        ESP_LOGE(TAG, "会话 blob 损坏 (n=%u len=%u)，废弃", n, (unsigned)len);
+        nvs_erase_key(h, "sessions");
+        nvs_commit(h);
+        nvs_close(h);
+        return;
+    }
     for (uint8_t k = 0; k < n; k++) {
         slot_blob_t b;
         memcpy(&b, buf + 10 + k * sizeof(slot_blob_t), sizeof(b));
         if (!b.used) {
             continue;
         }
-        session_slot_t *s = alloc_slot();
-        if (s == NULL) {
-            break;
-        }
+        session_slot_t *s = alloc_slot();   /* 永不返回 NULL(Q11)，表满驱逐最旧 */
         strlcpy(s->session_id, b.id, sizeof(s->session_id));
         strlcpy(s->tool, b.tool, sizeof(s->tool));
         strlcpy(s->project, b.proj, sizeof(s->project));
         strlcpy(s->last_tool, b.last_tool, sizeof(s->last_tool));
-        s->state = (ai_state_t)b.state;
+        /* Q06: state 取值钳位——坏值会让 ai_state_name 负索引/越界 */
+        s->state = (b.state <= (uint8_t)AI_STATE_ERROR) ? (ai_state_t)b.state : AI_STATE_IDLE;
         s->tokens = b.tokens;
         s->started_ms = b.started_ms + delta;
         s->state_since_ms = b.state_since_ms + delta;

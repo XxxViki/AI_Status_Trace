@@ -28,8 +28,11 @@ CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 ZCODE_SETTINGS = Path.home() / ".zcode" / "cli" / "config.json"
 # 板子地址（IP 变了改这里，重跑本脚本即可）
 BOARD_URL = "http://192.168.1.20"
-# 识别"我们装的 hook"的标记
-HOOK_MARKERS = ["esp_light_hook.ps1", "/events?event_type=", "ai_status_hook.cmd"]
+# 识别"我们装的 hook"的标记。
+# Q13: 必须含 claude_token_hook.py——Stop 装的是它而非 wrapper，
+# 标记表漏了它导致 --remove 卸不掉、每次重装再叠一条（实测叠过 2 条）
+HOOK_MARKERS = ["esp_light_hook.ps1", "/events?event_type=", "ai_status_hook.cmd",
+                "claude_token_hook.py"]
 
 # ---- 事件映射：工具原生事件名 -> ai-light 协议参数 ----
 CLAUDE_EVENTS = {
@@ -149,6 +152,23 @@ def install_zcode(remove: bool):
     save_json(ZCODE_SETTINGS, settings, "ZCode config hooks 清理(插件为唯一通道)")
 
 
+def self_check():
+    """Q13: 安装后自检——每个事件里"我们的"hook 条目必须恰好 1 条。
+    重复叠加（曾因标记表漏了 token 脚本，Stop 组叠到 2 条，
+    每次 Stop 起双份 Python 进程）要能立刻被看见"""
+    dup = []
+    settings = load_json(CLAUDE_SETTINGS)
+    for event, groups in settings.get("hooks", {}).items():
+        n = sum(1 for g in groups for h in g.get("hooks", []) if is_ours(h))
+        if n > 1:
+            dup.append(f"{event}x{n}")
+    if dup:
+        print(f"  !! 自检发现重复条目: {', '.join(dup)}（应为各 1 条）——请 --remove 后重装")
+        return False
+    print("  自检通过: 各事件 hook 条目无重复")
+    return True
+
+
 def main() -> int:
     remove = "--remove" in sys.argv
     if not remove:
@@ -160,6 +180,8 @@ def main() -> int:
         print("安装到 Claude Code 和 ZCode:")
     install_claude(remove)
     install_zcode(remove)
+    if not remove:
+        self_check()
     return 0
 
 

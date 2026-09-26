@@ -34,6 +34,7 @@ void       ai_sessions_on_event(const ai_event_msg_t *msg);
 void       ai_sessions_tick(void);                 /* 周期调用：超时转移与清理 */
 lamp_mode_t ai_sessions_aggregate(void);           /* 所有会话的最严重灯效 */
 int        ai_sessions_count(void);
+void       ai_sessions_tool_stats(const char *tool, int64_t *tokens, int *count); /* #077 统计页 */
 const char *ai_sessions_mode_name(lamp_mode_t m);
 
 /* 调试用：把会话表导出成 JSON 数组（id前8位/语义状态/无事件秒数），写入 buf */
@@ -53,8 +54,10 @@ typedef struct {
 } ai_card_info_t;
 int ai_sessions_top(ai_card_info_t *out, int max);
 
-/* 测试加速：把所有超时阈值除以 scale（仅缩放判定阈值，不缩放动画周期） */
+/* 测试加速：把所有超时阈值除以 scale（仅缩放判定阈值，不缩放动画周期）。
+ * Q10: 设置 5 分钟后自动复位回 1，/state 会回显当前值 */
 void ai_sessions_set_time_scale(int scale);
+int  ai_sessions_time_scale(void);
 
 /* NVS 持久化：重启后恢复会话表（时间基准自动校正），显示任务周期调用保存 */
 void ai_sessions_load(void);

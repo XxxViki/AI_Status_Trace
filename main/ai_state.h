@@ -35,7 +35,7 @@ typedef enum {
 typedef struct {
     ai_event_type_t event;
     ai_state_t      state;              /* 由 event 映射好的灯状态 */
-    char            session_id[40];     /* 会话标识 */
+    char            session_id[48];     /* 会话标识(ZCode=sess_+UUID=41字符,#079) */
     char            tool[8];            /* ai 工具：claude / zcode */
     char            project[32];        /* 项目名（cwd basename，长名不截断#038）*/
     char            last_tool[12];      /* 最近调用的工具名（Bash/Edit…）*/

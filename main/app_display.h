@@ -22,3 +22,7 @@ void app_display_set_page(int page);
  * 设置后显示任务暂停正常渲染, 专显配网状态直到重启。 */
 void app_display_enter_setup(void);
 void app_display_show_saved(void);
+
+/* #077: 每工具"当日消耗"token（看门狗 POST /stats/tok 推送），
+ * 统计页(翻页最后一页)显示。断电清零、看门狗 30s 内重推自愈。 */
+void app_display_set_today_tokens(const char *tool, int64_t today);

@@ -79,6 +79,8 @@ def board_event_raw(event_type, src, body: bytes, tok: int = 0):
     #033：Python 侧完整解析 body 提取 session/tool 放 URL——板内只扫前512字节，
     Stop 类大载荷的 sessionId 可能在截断线之后（会错落进 "?" 会话）。"""
     url = f"{BOARD}/events?event_type={event_type}&src={src}"
+    sid = ""      # #079: 先赋默认——json.loads 抛异常时 except 跳出,
+    tool = ""     # 下面 `if not sid` 才不会 UnboundLocalError(今晚坏 body 实测踩中)
     try:
         j = json.loads(body.decode("utf-8", "replace")) if body.strip() else {}
         sid = j.get("session_id") or j.get("sessionId") or ""
@@ -111,8 +113,159 @@ def enqueue_event(event_type, src, body: bytes, tok: int = 0):
 
 
 CLAUDE_PROJ_GLOB = os.path.join(os.path.expanduser("~"), ".claude", "projects", "*", "*.jsonl")
+ZCODE_DB = os.path.join(os.path.expanduser("~"), ".zcode", "cli", "db", "db.sqlite")
 _tok_state = {}   # path -> [offset, last_tok, pending_bytes, recreate_at]
 _claude_recreate_at = 0.0   # #054: claude 卡重建限流
+# #077: 每工具当日消耗（统计页"today"数字）。
+# _day_sum[path] = [day, 当日累计, 已计入的字节偏移]——单一代码路径(_crawl_today)
+# 增量扫描，按字节偏移防重复计数；只认"时间戳>=本地零点"的 usage 行，
+# 所以全天回溯（含看门狗启动前的用量），跨日自动清零。
+_day_sum = {}
+_last_stats_push = 0.0
+
+
+def _crawl_today():
+    """#077: 扫描今天动过的 Claude 转录，累计当日消耗(input+output+cache_creation)。
+    每次只读上次偏移之后的新字节；断电/重启后从文件头回溯全天——
+    宁可多扫不可漏算。"""
+    import glob as _glob
+    from datetime import datetime
+    midnight = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    today = time.strftime("%Y-%m-%d")
+    for path in _glob.glob(CLAUDE_PROJ_GLOB):
+        try:
+            if os.path.getmtime(path) < midnight:
+                continue
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        ds = _day_sum.get(path)
+        if ds is not None and ds[0] == today and ds[2] >= size:
+            continue
+        start_off = ds[2] if (ds is not None and ds[2] > 0) else 0
+        total = 0
+        try:
+            with open(path, "rb") as f:
+                f.seek(start_off)
+                for raw in f:
+                    if b"usage" not in raw:
+                        continue
+                    raw = raw.strip()
+                    if not raw.startswith(b"{"):
+                        continue
+                    try:
+                        obj = json.loads(raw.decode("utf-8", "replace"))
+                    except Exception:
+                        continue
+                    m = obj.get("message")
+                    u = m.get("usage") if isinstance(m, dict) else None
+                    if not isinstance(u, dict):
+                        u = obj.get("usage")
+                    if not isinstance(u, dict):
+                        continue
+                    burn = (int(u.get("input_tokens") or 0)
+                            + int(u.get("output_tokens") or 0)
+                            + int(u.get("cache_creation_input_tokens") or 0))
+                    if burn <= 0:
+                        continue
+                    ts = obj.get("timestamp")
+                    if not isinstance(ts, str):
+                        continue    # 无时间戳无法归日: 宁少勿错
+                    try:
+                        if datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() >= midnight:
+                            total += burn
+                    except Exception:
+                        continue
+        except OSError:
+            continue
+        if ds is None or ds[0] != today:
+            ds = [today, 0, 0]
+            _day_sum[path] = ds
+        ds[1] += total
+        ds[2] = size
+
+
+def push_tool_stats():
+    """#077: 每 30s 推每工具当日消耗到板子 POST /stats/tok（绝对值，幂等）。"""
+    global _last_stats_push
+    now = time.time()
+    if now - _last_stats_push < 30:
+        return
+    _last_stats_push = now
+    _crawl_today()
+    today = time.strftime("%Y-%m-%d")
+    totals = {}
+    for day, s, _off in _day_sum.values():
+        if day == today:
+            totals["claude"] = totals.get("claude", 0) + s
+    if _zcode_today >= 0:
+        totals["zcode"] = _zcode_today
+    # 状态表清理：转录已删除的旧条目（防长跑无限增长）
+    if len(_day_sum) > 64:
+        for p in list(_day_sum):
+            if not os.path.exists(p):
+                del _day_sum[p]
+    for tool, v in totals.items():
+        try:
+            url = f"{BOARD}/stats/tok?tool={tool}&today={v}"
+            req = urllib.request.Request(url, data=b"{}", method="POST")
+            opener().open(req, timeout=2).read()
+        except Exception:
+            pass    # 失败不重试特殊处理：30s 后下一轮绝对值重推自然覆盖
+
+
+# ---------- ZCode 用量（#079）----------
+# ZCode 日志里的 usage 全被 [Redacted]，真实数据在 db.sqlite 的 model_usage 表
+# （每行一次模型请求：session_id/started_at/input/output/cache_*）。
+_zcode_today = -1          # 当日 input+output+cache_creation 合计（-1=读库失败）
+_zcode_tok_pushed = {}     # sid -> 已推送的当前上下文值（负值=板上无卡，值变了再试）
+
+
+def zcode_usage_watch():
+    """职责六(#079)：ZCode 用量上屏。
+      now  = 每会话最新一条请求的上下文(input+cache_read+cache_creation)
+             -> POST /sessions/tok 点亮卡片 token
+      today = 当日 Σ(input+output+cache_creation) -> push_tool_stats 推统计页
+    只读打开(WAL 允许并发读)；库被锁/不存在时静默跳过，下轮再试。"""
+    global _zcode_today
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True, timeout=2)
+    except Exception:
+        return
+    try:
+        cur = con.cursor()
+        midnight_ms = time.mktime(
+            time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d")) * 1000
+        row = cur.execute(
+            "SELECT SUM(input_tokens+output_tokens+cache_creation_input_tokens) "
+            "FROM model_usage WHERE started_at >= ?", (midnight_ms,)).fetchone()
+        _zcode_today = row[0] or 0
+
+        latest = {}
+        for sid, it, cr, cc in cur.execute(
+                "SELECT session_id, input_tokens, cache_read_input_tokens, "
+                "cache_creation_input_tokens FROM model_usage "
+                "ORDER BY started_at"):
+            if sid:
+                latest[sid] = it + cr + cc
+        for sid, ctx in latest.items():
+            prev = _zcode_tok_pushed.get(sid)
+            if prev == ctx:
+                continue
+            try:
+                url = f"{BOARD}/sessions/tok?sid={sid}&tok={ctx}"
+                req = urllib.request.Request(url, data=b"{}",
+                                             headers={"Content-Type": "application/json"})
+                with opener().open(req, timeout=2) as r:
+                    resp = json.loads(r.read())
+                _zcode_tok_pushed[sid] = ctx if resp.get("updated") else -ctx
+            except Exception:
+                pass    # 板子不可达: 下轮(10s)重试
+    except Exception as e:
+        log(f"zcode用量读取异常: {type(e).__name__}: {e}")
+    finally:
+        con.close()
 
 
 def claude_token_watch():
@@ -170,6 +323,8 @@ def claude_token_watch():
                      + int(u.get("cache_creation_input_tokens") or 0))
                 if t > 0:
                     tok = t                          # 保留最后一个非零
+                # 当日消耗的统计不在此处做——单一代码路径在 _crawl_today(#077)，
+                # 按字节偏移防重复；此处只管"当前上下文大小"的实时推送
         if tok > 0:
             st[4] = tok
         if st[4] > 0 and st[4] != st[1]:     # known != pushed -> 推送(失败保持-1下轮重试)
@@ -243,6 +398,12 @@ def drain_queue():
             if not body.strip():
                 os.remove(path)     # #065B: 空 body 事件(幽灵源)直接丢弃
                 log(f"空 body 事件丢弃: {name}")
+                continue
+            try:                    # #079: 非 JSON body(实测出现过 base64 乱码)转发
+                json.loads(body)    # 到板上只会落进"?"幽灵桶——源头丢弃
+            except Exception:
+                os.remove(path)
+                log(f"非JSON事件丢弃: {name} body[:40]={body[:40]!r}")
                 continue
             board_event_raw(ev, src, body, tok)
             os.remove(path)
@@ -416,6 +577,19 @@ def main() -> int:
             claude_token_watch()
         except Exception as e:
             log(f"token监视异常: {type(e).__name__}: {e}")
+
+        # 职责五：每工具当日消耗推送（每 30s，#077 统计页）
+        try:
+            push_tool_stats()
+        except Exception as e:
+            log(f"统计推送异常: {type(e).__name__}: {e}")
+
+        # 职责六：ZCode 用量上屏（每 10s 读 model_usage，#079）
+        if tick % 10 == 0:
+            try:
+                zcode_usage_watch()
+            except Exception as e:
+                log(f"zcode用量异常: {type(e).__name__}: {e}")
 
         # 职责三：转发 hook 事件队列（每 1 秒，网络彻底移出 AI 关键路径 #030）
         try:

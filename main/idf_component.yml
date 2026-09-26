@@ -1,4 +1,2 @@
-## 组件管理器清单：声明第三方依赖
-## IDF 6.x 起内置的 json(cJSON) 组件被移除，改用 registry 的 espressif/cjson
-dependencies:
-  espressif/cjson: "^1.7.19"
+## 组件管理器清单（Q15: cJSON 死依赖已移除，当前无第三方依赖）
+dependencies: {}

@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include "esp_log.h"
 #include "esp_system.h"
-#include "cJSON.h"
 #include "ai_state.h"
 #include "app_display.h"
 #include "app_wifi.h"
@@ -38,10 +37,15 @@ static esp_err_t health_get(httpd_req_t *req)
 static esp_err_t state_get(httpd_req_t *req)
 {
     char body[1024];   /* 8会话 x ~90B = 720B, 512会截断成非法JSON */
-    int n = snprintf(body, sizeof(body), "{\"lamp\":\"%s\",\"sessions\":%d,\"heap\":%u,\"table\":",
+    int n = snprintf(body, sizeof(body), "{\"lamp\":\"%s\",\"sessions\":%d,\"heap\":%u,\"ts\":%d,\"table\":",
                      ai_sessions_mode_name(ai_sessions_aggregate()), ai_sessions_count(),
-                     (unsigned)esp_get_free_heap_size());
+                     (unsigned)esp_get_free_heap_size(), ai_sessions_time_scale());
     n += ai_sessions_dump_json(body + n, sizeof(body) - n);
+    /* Q01: 收尾前钳位——dump_json 现已保证 n <= sizeof-2，这里防的是
+     * "前缀/拼接某处又引入负长度"这类回归（负 int 转 size_t = 巨值越界写） */
+    if (n < 0 || n > (int)sizeof(body) - 2) {
+        n = (int)sizeof(body) - 2;
+    }
     snprintf(body + n, sizeof(body) - n, "}");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
@@ -83,6 +87,22 @@ static bool json_scan_string(const char *body, const char *key, char *out, int o
     }
     out[n] = '\0';
     return n > 0;
+}
+
+/* 在文本里找 "permission" 且不是 permission_mode/permission_suggestions
+ * 字段名的一部分（Q14：基础 schema 的 permission_mode 让每个 Notification
+ * 的 body 都含这个词，裸 strstr 必然误报"要权限"） */
+static bool text_has_permission_word(const char *s)
+{
+    const char *p = s;
+    while ((p = strstr(p, "permission")) != NULL) {
+        const char *next = p + strlen("permission");
+        if (strncmp(next, "_mode", 5) != 0 && strncmp(next, "_suggestions", 12) != 0) {
+            return true;
+        }
+        p = next;
+    }
+    return false;
 }
 
 /* POST /events —— 核心入口，两种调用方式：
@@ -143,9 +163,17 @@ static esp_err_t events_post(httpd_req_t *req)
     {
         size_t left = req->content_len;
         bool first = true;
+        int timeouts = 0;
         while (left > 0) {
             int want = (left > BODY_MAX_LEN) ? BODY_MAX_LEN : (int)left;
             int r = httpd_req_recv(req, first ? body : discard, want);
+            if (r == HTTPD_SOCK_ERR_TIMEOUT && timeouts < 8) {
+                /* Q07: 超时重试——直接 break 会把剩余字节留在 socket，
+                 * 污染 keep-alive 连接上的下一个请求（curl 每次新连接所以
+                 * 一直没显形，看门狗的会话复用就会踩） */
+                timeouts++;
+                continue;
+            }
             if (r <= 0) {
                 break;
             }
@@ -160,7 +188,7 @@ static esp_err_t events_post(httpd_req_t *req)
     /* 3) 解析：event_type + session_id */
     ai_event_msg_t msg = {0};
     const char *ev_str = ev_param[0] ? ev_param : NULL;
-    char sid[40] = "?";
+    char sid[48] = "?";   /* #079: ZCode 会话ID 41字符,40会截断 */
 
     /* 关键字段用字符串扫描提取，不用 cJSON_Parse——
      * 大 payload(带完整工具参数)会被 512 字节读取截断，截断的 JSON 整体解析必败(#025)，
@@ -235,20 +263,32 @@ static esp_err_t events_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    /* Notification 细分（问题记录 #013）：
-     * - 报文含 "permission"（如 "Claude needs your permission to use Bash"）
-     *   → 真正需要人介入，红灯
-     * - 其余（如 "Claude is waiting for your input" 闲置提醒）→ 视为完成（绿）。
-     *   附带的自愈效果：若 Stop 事件丢失导致灯卡黄，闲置提醒最迟 60s 后把灯修复为绿 */
+    /* Notification 细分（#013 + Q14）：
+     * 判定链 notification_type → message → body 全文。
+     * - notification_type 是权威字段（schema 必有）：permission_prompt /
+     *   elicitation_dialog = 要人介入(红)；idle_prompt / auth_success = 绿
+     * - 不再裸 strstr(body,"permission")——基础 schema 的 permission_mode
+     *   在每个 Notification 里都出现，闲置提醒曾被全判成红、#013 的
+     *   "闲置提醒自愈卡黄"随之失效。兜底路径里的 permission 也用
+     *   text_has_permission_word 排除字段名命中 */
     if (msg.event == AI_EV_NOTIFICATION) {
-        /* 报文含 permission -> 要权限(红)；否则视为完成/闲置(绿)。
-         * 直接 strstr，同样对截断免疫 */
-        if (strstr(body, "permission") != NULL) {
-            msg.state = AI_STATE_ERROR;
+        char ntype[24] = "";
+        char nmsg[96] = "";
+        bool have_type = json_scan_string(body, "notification_type", ntype, sizeof(ntype));
+        bool have_msg = json_scan_string(body, "message", nmsg, sizeof(nmsg));
+        bool need_human;
+        if (have_type) {
+            need_human = strcmp(ntype, "permission_prompt") == 0
+                      || strcmp(ntype, "elicitation_dialog") == 0;
+        } else if (have_msg) {
+            need_human = text_has_permission_word(nmsg);
         } else {
-            msg.state = AI_STATE_DONE;
+            need_human = text_has_permission_word(body);   /* 老版本 payload 兜底 */
         }
-        ESP_LOGI(TAG, "notification 细分 -> %s", ai_state_name(msg.state));
+        msg.state = need_human ? AI_STATE_ERROR : AI_STATE_DONE;
+        ESP_LOGI(TAG, "notification type=%s -> %s",
+                 have_type ? ntype : (have_msg ? "msg" : "body"),
+                 ai_state_name(msg.state));
     }
 
     ESP_LOGI(TAG, "收到事件 %s (session=%s) -> %s",
@@ -297,6 +337,24 @@ static esp_err_t sessions_tok_post(httpd_req_t *req)
     snprintf(body, sizeof(body), "{\"updated\":%d}", updated);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/* POST /stats/tok?tool=<tool>&today=N —— 每工具"当日消耗"token（#077 统计页）。
+ * 看门狗从转录 usage 累计(input+output+cache_creation)后周期推送绝对值；
+ * 断电清零、下轮推送(≤30s)自愈。只更新显示层，不动会话表 */
+static esp_err_t stats_tok_post(httpd_req_t *req)
+{
+    char query[96] = {0};
+    char tool[12] = {0};
+    char v[20] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "tool", tool, sizeof(tool));
+        httpd_query_key_value(query, "today", v, sizeof(v));
+    }
+    app_display_set_today_tokens(tool, atoll(v));
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "ok", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -376,6 +434,7 @@ esp_err_t app_http_start(void)
     static const httpd_uri_t events = { .uri = "/events", .method = HTTP_POST, .handler = events_post };
     static const httpd_uri_t clear  = { .uri = "/sessions/clear", .method = HTTP_POST, .handler = sessions_clear_post };
     static const httpd_uri_t stok   = { .uri = "/sessions/tok", .method = HTTP_POST, .handler = sessions_tok_post };
+    static const httpd_uri_t statst = { .uri = "/stats/tok", .method = HTTP_POST, .handler = stats_tok_post };
     static const httpd_uri_t dbgrow = { .uri = "/dbg/row", .method = HTTP_GET, .handler = dbg_row_get };
     static const httpd_uri_t dbgpage = { .uri = "/dbg/page", .method = HTTP_GET, .handler = dbg_page_get };
 
@@ -384,6 +443,7 @@ esp_err_t app_http_start(void)
     httpd_register_uri_handler(server, &events);
     httpd_register_uri_handler(server, &clear);
     httpd_register_uri_handler(server, &stok);
+    httpd_register_uri_handler(server, &statst);
     httpd_register_uri_handler(server, &dbgrow);
     httpd_register_uri_handler(server, &dbgpage);
     static const httpd_uri_t dbgsetup = { .uri = "/dbg/setup", .method = HTTP_GET, .handler = dbg_setup_get };

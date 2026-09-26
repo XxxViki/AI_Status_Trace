@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_chip_info.h"
 #include "esp_system.h"
+#include "nvs_flash.h"
 #include "io_extension.h"
 #include "ST7789.h"
 #include "app_wifi.h"
@@ -37,15 +38,25 @@ void app_main(void)
     ESP_ERROR_CHECK(IO_EXTENSION_Init());
     ESP_ERROR_CHECK(LCD_Init());
 
-    /* WiFi 初始化内部已完成 nvs_flash_init，会话表随后从 NVS 恢复 */
+    /* Q08: NVS 就地初始化（原先只在 app_wifi_start 里做），会话表恢复放到
+     * 显示任务启动之前——显示任务起来后每 50ms tick/aggregate 读表，主任务
+     * 再并发写表就是无锁竞态；提前 load 还让重启后卡片不用先等 WiFi 的 15 秒 */
     ai_sessions_init();
+    {
+        esp_err_t nvs_err = nvs_flash_init();
+        if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            nvs_err = nvs_flash_init();
+        }
+        ESP_ERROR_CHECK(nvs_err);
+    }
+    ai_sessions_load();   /* 恢复重启前的会话表（活会话不再被烧录误杀 #023） */
 
     /* 显示任务先起，联网过程中屏幕就有东西看 */
     app_display_init();
 
     /* WiFi：最多等 15 秒拿 IP；超时也继续（后台自动重连） */
     app_wifi_start(15000);
-    ai_sessions_load();   /* 恢复重启前的会话表（活会话不再被烧录误杀 #023） */
 
     /* HTTP 服务：端口 80，端点 /health /state /events */
     ESP_ERROR_CHECK(app_http_start());

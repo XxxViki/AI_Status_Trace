@@ -16,5 +16,4 @@ idf_component_register(
         esp_event      # 事件循环
         nvs_flash      # WiFi 驱动依赖的键值存储
         esp_http_server # HTTP 服务
-        espressif__cjson # cJSON 解析（registry 组件，由 idf_component.yml 引入）
 )

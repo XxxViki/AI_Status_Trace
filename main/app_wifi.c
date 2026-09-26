@@ -176,6 +176,44 @@ static esp_err_t setup_save_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---------- 配网模式串口命令（#075）----------
+ * EXITSETUP: 直接重启回正常模式（标志在进入配网时已清，重启即退出；
+ *   没有这条命令前，串口在配网模式下又聋又哑，只能靠手机或断电）
+ * SETWIFI <ssid> <pass>: 串口配网（与正常模式同一条命令） */
+static void setup_serial_task(void *arg)
+{
+    char line[128];
+    int n = 0;
+    printf("\r\nsetup> EXITSETUP | SETWIFI <ssid> <pass>\r\n");
+    for (;;) {
+        int c = getchar();
+        if (c < 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            if (n > 0) {
+                line[n] = '\0';
+                if (strncmp(line, "EXITSETUP", 9) == 0) {
+                    ESP_LOGW(TAG, "串口退出配网，重启回正常模式");
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
+                }
+                if (wifi_config_handle_serial(line)) {
+                    ESP_LOGI(TAG, "WiFi config updated, restart in 1s...");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    esp_restart();
+                }
+                n = 0;
+            }
+            continue;
+        }
+        if (n < (int)sizeof(line) - 1) {
+            line[n++] = (char)c;
+        }
+    }
+}
+
 void app_wifi_start_setup_mode(void)
 {
     setup_flag_set(false);       /* 清标志, 防止重启死循环 */
@@ -214,6 +252,7 @@ void app_wifi_start_setup_mode(void)
     ESP_LOGW(TAG, "Setup HTTP ready (192.168.4.1)");
     /* #069: 屏幕显示配网状态（AP 信息 + IP） */
     app_display_enter_setup();
+    xTaskCreate(setup_serial_task, "setup_ser", 4096, NULL, 2, NULL);   /* #075 */
 
     for (;;) {                    /* 配网模式不返回——专职服务配置页 */
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -293,7 +332,15 @@ esp_err_t app_wifi_start(int timeout_ms)
     if (have_nvs) {
         strlcpy((char *)wifi_cfg.sta.ssid, user.ssid, sizeof(wifi_cfg.sta.ssid));
         strlcpy((char *)wifi_cfg.sta.password, user.pass, sizeof(wifi_cfg.sta.password));
-        ESP_LOGI(TAG, "Credentials: NVS (ssid=\"%s\")", user.ssid);
+        /* #076: 用户凭据也可选锁 BSSID——同名多 AP 且其中一台跑独立 NAT 时,
+         * 按信号自动选网会连上孤岛网段(串口 SETBSSID 设置/清除) */
+        if (user.bssid_lock) {
+            memcpy(wifi_cfg.sta.bssid, user.bssid, 6);
+            wifi_cfg.sta.bssid_set = true;
+            ESP_LOGI(TAG, "Credentials: NVS (ssid=\"%s\" bssid locked)", user.ssid);
+        } else {
+            ESP_LOGI(TAG, "Credentials: NVS (ssid=\"%s\")", user.ssid);
+        }
     } else {
         strlcpy((char *)wifi_cfg.sta.ssid, CONFIG_AI_STATUS_WIFI_SSID,
                 sizeof(wifi_cfg.sta.ssid));

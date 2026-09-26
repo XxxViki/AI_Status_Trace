@@ -16,6 +16,8 @@ typedef struct {
     char ssid[WIFI_CFG_SSID_MAX];
     char pass[WIFI_CFG_PASS_MAX];
     bool from_nvs;      /* true=NVS 用户配置, false=menuconfig 编译默认 */
+    bool bssid_lock;    /* #076: 同 SSID 多 AP 时锁定指定 BSSID（防连到 NAT 孤岛） */
+    uint8_t bssid[6];
 } wifi_cfg_t;
 
 /* 读配置（须在 nvs_flash_init 之后调用）。返回 true 表示 NVS 里有用户配置 */
@@ -24,6 +26,7 @@ bool wifi_config_load(wifi_cfg_t *out);
 /* 写配置到 NVS（立即提交） */
 void wifi_config_save(const char *ssid, const char *pass);
 
-/* 串口配网命令处理：解析 "SETWIFI <ssid> <pass>"，成功写 NVS 后返回 true
- * （调用方收到 true 后 esp_restart()）。非 SETWIFI 命令返回 false。 */
+/* 串口配网命令处理：SETWIFI <ssid> <pass> / SETBSSID <mac|off>，
+ * 成功写 NVS 后返回 true（调用方收到 true 后 esp_restart()）。
+ * 非本模块命令返回 false。 */
 bool wifi_config_handle_serial(const char *line);

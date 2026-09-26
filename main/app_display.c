@@ -153,6 +153,9 @@ static void flush_all(void)
 
 static void draw_char(int x, int y, char c, int scale, uint16_t color)
 {
+    if (c < 0x20 || c > 0x7e) {
+        c = '?';   /* Q05: 字体表只覆盖 ASCII，越界索引读表外常量=乱画字形 */
+    }
     const uint8_t *g = k_font5x7[(int)(unsigned char)c];
     for (int r = 0; r < FONT5X7_H; r++) {
         for (int col = 0; col < FONT5X7_W; col++) {
@@ -389,6 +392,7 @@ static void draw_state_age(int cx, int y, const ai_card_info_t *info, int64_t no
     case LAMP_YELLOW_STEADY: label = "STUCK"; break;
     case LAMP_YELLOW_FLASH:  label = "WAIT";  break;
     case LAMP_RED_FLASH:     label = "WAIT";  break;
+    case LAMP_IDLE:          label = "IDLE";  break;   /* Q09: 空闲卡不再自相矛盾地显示 DONE */
     default:                 label = "DONE";  break;
     }
     char buf[20];
@@ -401,6 +405,9 @@ static void draw_state_age(int cx, int y, const ai_card_info_t *info, int64_t no
  * 实现半档：字形 8x11、步进 10px —— 比 ×2 小一点，还能多放字符。 */
 static void draw_char_15(int x, int y, char c, uint16_t color)
 {
+    if (c < 0x20 || c > 0x7e) {
+        c = '?';   /* Q05: 同 draw_char，表只覆盖 ASCII */
+    }
     const uint8_t *g = k_font5x7[(int)(unsigned char)c];
     for (int r = 0; r < FONT5X7_H; r++) {
         int dy0 = (r * 3) / 2, dy1 = ((r + 1) * 3) / 2 - 1;
@@ -719,6 +726,126 @@ void app_display_show_saved(void)
     s_setup_screen = true;
 }
 
+/* ---------- TOKENS 统计页（#077）----------
+ * 翻页翻到底的最后一页。每格一个工具（固定 2x3 布局）：
+ *   logo + 工具名+会话数 / "now"=当前上下文合计(会话表求和,×2大字) /
+ *   "+N today"=当日消耗(看门狗从转录 usage 累计后经 POST /stats/tok 推送,
+ *   断电清零、30s 内重推自愈)。未接入 token 源的工具显示 "--"。 */
+static const char *const k_stat_tools[6] = {
+    "claude", "zcode", "trae", "codex", "chatgpt", "hermes",
+};
+static const char *const k_stat_names[6] = {
+    "Claude", "Zcode", "Trae", "Codex", "ChatGPT", "Hermes",
+};
+static int64_t s_today_tokens[6];
+static volatile bool s_stats_dirty = false;
+
+void app_display_set_today_tokens(const char *tool, int64_t today)
+{
+    for (int i = 0; i < 6; i++) {
+        if (strcmp(tool, k_stat_tools[i]) == 0) {
+            if (s_today_tokens[i] != today) {
+                s_today_tokens[i] = today;
+                s_stats_dirty = true;
+            }
+            return;
+        }
+    }
+}
+
+/* token 数格式化：-- / 386K / 1.24M（屏幕宽度有限，K/M 缩写够用） */
+static void fmt_tokens(int64_t t, char *out, int cap)
+{
+    if (t <= 0) {
+        snprintf(out, cap, "--");
+    } else if (t < 1000) {
+        snprintf(out, cap, "%lld", (long long)t);
+    } else if (t < 1000000) {
+        snprintf(out, cap, "%lldK", (long long)((t + 999) / 1000));
+    } else {
+        snprintf(out, cap, "%lld.%02lldM",
+                 (long long)(t / 1000000), (long long)(t % 1000000 / 10000));
+    }
+}
+
+static void draw_stats_page(void)
+{
+    char buf[24];
+    for (int i = 0; i < PH * PW; i++) {
+        s_frame[i] = COL_BG;
+    }
+    /* 头部：TOKENS + 右侧两行合计（now/day） */
+    draw_text(4, 10, "TOKENS", 2, COL_TXT);
+    int64_t sum_now = 0, sum_day = 0;
+    for (int i = 0; i < 6; i++) {
+        int64_t t;
+        int c;
+        ai_sessions_tool_stats(k_stat_tools[i], &t, &c);
+        sum_now += t;
+        sum_day += s_today_tokens[i];
+    }
+    char nbuf[10], dbuf[10];
+    fmt_tokens(sum_now, nbuf, sizeof(nbuf));
+    fmt_tokens(sum_day, dbuf, sizeof(dbuf));
+    snprintf(buf, sizeof(buf), "now %s", nbuf);
+    draw_text(LW - 4 - text_w(buf, 1), 4, buf, 1, COL_TXT_DIM);
+    snprintf(buf, sizeof(buf), "day +%s", dbuf);
+    draw_text(LW - 4 - text_w(buf, 1), 15, buf, 1, COL_GRN);
+
+    /* 2x3 格子：每格 154x44，格内 logo 26 + 名字 + now(×2) + today(×1) */
+    for (int i = 0; i < 6; i++) {
+        int x = 4 + (i % 2) * 158;
+        int y = 32 + (i / 2) * 46;
+        fill_rect(x, y, x + 153, y + 43, COL_CARD_BG);
+        draw_logo(k_stat_tools[i], x + 3, y + 3);
+        int64_t t;
+        int c;
+        ai_sessions_tool_stats(k_stat_tools[i], &t, &c);
+        if (c > 0) {
+            snprintf(buf, sizeof(buf), "%s x%d", k_stat_names[i], c);
+        } else {
+            snprintf(buf, sizeof(buf), "%s", k_stat_names[i]);
+        }
+        draw_text(x + 33, y + 4, buf, 1, COL_TXT_DIM);
+        fmt_tokens(t, buf, sizeof(buf));
+        draw_text(x + 33, y + 15, buf, 2, (t > 0) ? COL_TXT : COL_TXT_DIM);
+        if (s_today_tokens[i] > 0) {
+            char tb[12];
+            fmt_tokens(s_today_tokens[i], tb, sizeof(tb));
+            snprintf(buf, sizeof(buf), "+%s today", tb);
+            draw_text(x + 33, y + 34, buf, 1, COL_GRN);
+        }
+    }
+    flush_all();
+}
+
+/* 按住 ≥1s 的叠加倒计时框（#077）：给"还要按多久"一个可见反馈，
+ * 取消路径也是可见的——不再靠用户默数 3 秒 */
+static void draw_hold_overlay(int64_t held_ms)
+{
+    const int w = 232, h = 64;
+    int x0 = (LW - w) / 2, y0 = 54;
+    fill_rect(x0, y0, x0 + w - 1, y0 + h - 1, COL_CARD);
+    fill_rect(x0, y0, x0 + w - 1, y0, COL_TXT_DIM);            /* 上下边框 */
+    fill_rect(x0, y0 + h - 1, x0 + w - 1, y0 + h - 1, COL_TXT_DIM);
+    fill_rect(x0, y0, x0, y0 + h - 1, COL_TXT_DIM);
+    fill_rect(x0 + w - 1, y0, x0 + w - 1, y0 + h - 1, COL_TXT_DIM);
+    if (held_ms >= 3000) {
+        draw_text_centered(LW / 2, y0 + 10, "RELEASE TO RESTART", 2, COL_GRN);
+        draw_text_centered(LW / 2, y0 + 34, "entering setup mode", 1, COL_TXT_DIM);
+    } else {
+        draw_text_centered(LW / 2, y0 + 6, "SETUP MODE?", 2, COL_YEL);
+        int fw = (int)((held_ms - 1000) * 120 / 2000);          /* 0..120 进度条 */
+        if (fw < 1) {
+            fw = 1;
+        }
+        fill_rect(x0 + 56, y0 + 28, x0 + 175, y0 + 33, COL_CARD);   /* 轨道 */
+        fill_rect(x0 + 56, y0 + 28, x0 + 55 + fw, y0 + 33, COL_YEL);
+        draw_text_centered(LW / 2, y0 + 40, "release = cancel", 1, COL_TXT_DIM);
+    }
+    flush_region(x0, y0, x0 + w - 1, y0 + h - 1);
+}
+
 /* ---------- 主任务 ---------- */
 
 #define BOOT_BTN_GPIO     GPIO_NUM_9   /* 厂商确认：BOOT 键=GPIO9，低电平有效 */
@@ -761,7 +888,6 @@ static void display_task(void *arg)
     int last_shown = -1;
     int page = 0;
     int64_t page_set_ms = 0;
-    bool btn_prev = false;
     int64_t btn_last_ms = 0;
     int64_t btn_press_start = 0;
     bool btn_long_fired = false;
@@ -782,6 +908,17 @@ static void display_task(void *arg)
                 draw_text_centered(LW / 2, 140, "3. Open browser:", 1, COL_TXT);
                 draw_text_centered(LW / 2, 152, "192.168.4.1", 2, COL_GRN);
                 flush_all();
+                /* #075 排障采样（每 5s 重复，串口随时可验证）：帧缓冲里黄条行
+                 * 应=FDE4、背景行应=10A3。串口值正确而屏幕黑 -> 推屏问题；
+                 * 值错 -> 绘制问题。分水岭定位法同 /dbg/row(#047)。 */
+                static int64_t s_setup_last_diag = -10000;
+                int64_t tn = esp_timer_get_time() / 1000;
+                if (tn - s_setup_last_diag >= 5000) {
+                    s_setup_last_diag = tn;
+                    ESP_LOGI(TAG, "setup屏帧采样: y25=%04X(黄条FDE4) y5=%04X(背景10A3) y70=%04X(文字)",
+                             app_display_pixel(LW / 2, 25), app_display_pixel(LW / 2, 5),
+                             app_display_pixel(LW / 2, 70));
+                }
             } else if (s_setup_kind == 2) {
                 /* SAVED 页：绿底 + 重启提示 */
                 for (int i = 0; i < PH * PW; i++) s_frame[i] = COL_BG;
@@ -814,14 +951,18 @@ static void display_task(void *arg)
         if (pages < 1) {
             pages = 1;
         }
+        pages += 1;   /* #077: 最后一页固定是 TOKENS 统计页 */
+        bool stats_page = (page == pages - 1);
         if (n != last_n) {
             last_n = n;
             page = 0;                   /* 会话增减：回到第 1 页 */
             force_relayout = true;
+            stats_page = false;
         }
         if (page >= pages) {
             page = 0;                   /* 页数缩水：回第 1 页 */
             force_relayout = true;
+            stats_page = false;
         }
 
         /* 调试端点请求的翻页 */
@@ -830,51 +971,71 @@ static void display_task(void *arg)
             s_page_req = -1;
             page_set_ms = now;
             force_relayout = true;
+            stats_page = (page == pages - 1);
+        }
+        /* #077: 看门狗推了新的当日消耗 -> 重画（统计页上的数字才会动） */
+        if (s_stats_dirty) {
+            s_stats_dirty = false;
+            force_relayout = true;
         }
 
-        /* BOOT 长按 3 秒 → 进配网模式（#067）：
-         * 屏幕显示"配网模式 AP:AI-Status-Setup", 重启后变热点 */
+        /* BOOT 键交互（#067/#075/#077 定稿）：
+         *   短按松开(<600ms)  -> 翻页（松开才判定，防误触）
+         *   按住 1s~3s         -> 叠加倒计时框（松开=取消，什么都不发生）
+         *   按满 3s            -> 提示 RELEASE TO RESTART，松手且稳定 300ms 才复位
+         * 复位前必须确认 GPIO9 已稳定释放——它是复位瞬间的启动模式引脚(strap)，
+         * 带低电平复位会进 ROM 下载模式（#075 黑屏的真凶）。 */
         bool btn = (gpio_get_level(BOOT_BTN_GPIO) == 0);
+        bool hold_overlay = false;
         if (btn) {
             if (btn_press_start == 0) {
                 btn_press_start = now;
-            } else if (now - btn_press_start > 3000 && !btn_long_fired) {
-                btn_long_fired = true;
-                ESP_LOGW(TAG, "BOOT 长按 3 秒 -> 进入配网模式");
-                /* 屏幕显示配网状态(帧缓冲直接画, 不走 LVGL) */
-                for (int i = 0; i < PH * PW; i++) {
-                    s_frame[i] = COL_BG;
-                }
-                /* 逻辑坐标: 居中大字 SETUP MODE + AP 名 + IP */
-                s_clip_x0 = 0; s_clip_x1 = LW - 1;
-                fill_rect(0, 30, LW - 1, 60, COL_YEL);
-                draw_text_centered(LW / 2, 36, "SETUP MODE", 2, COL_BG);
-                draw_text_centered(LW / 2, 80, "AP: AI-Status-Setup", 1, COL_TXT);
-                draw_text_centered(LW / 2, 100, "pass: 12345678", 1, COL_TXT);
-                draw_text_centered(LW / 2, 120, "http://192.168.4.1", 1, COL_GRN);
-                flush_all();
-                app_wifi_setup_flag_set();
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                esp_restart();
             }
-        } else {
+            int64_t held = now - btn_press_start;
+            if (held >= 1000) {
+                hold_overlay = true;
+                draw_hold_overlay(held);
+                if (held >= 3000 && !btn_long_fired) {
+                    btn_long_fired = true;
+                    ESP_LOGW(TAG, "BOOT 按满 3 秒，等松手重启进配网");
+                }
+            }
+        } else if (btn_press_start > 0) {       /* 松开瞬间统一判定 */
+            int64_t held = now - btn_press_start;
+            if (btn_long_fired) {
+                app_wifi_setup_flag_set();
+                /* 稳定松开 300ms 才复位；期间又按下 = 回到等待松手（永不带电复位）*/
+                for (;;) {
+                    int stable = 0;
+                    while (gpio_get_level(BOOT_BTN_GPIO) == 1) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                        stable += 20;
+                        if (stable >= 300) {
+                            esp_restart();
+                        }
+                    }
+                    while (gpio_get_level(BOOT_BTN_GPIO) == 0) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                    }
+                }
+            } else if (held < 600 && now - btn_last_ms > BTN_DEBOUNCE_MS) {
+                btn_last_ms = now;
+                page = (page + 1) % pages;
+                page_set_ms = now;
+                force_relayout = true;
+                ESP_LOGI(TAG, "BOOT键 -> 第 %d/%d 页", page + 1, pages);
+            }
+            /* 600ms~3s 之间松开 = 用户取消了：不翻页、不配网 */
             btn_press_start = 0;
             btn_long_fired = false;
+            force_relayout = true;      /* 清掉叠加框/恢复正常页 */
         }
-        btn_prev = btn;
-        if (btn && !btn_prev && now - btn_last_ms > BTN_DEBOUNCE_MS) {
-            btn_last_ms = now;
-            page = (page + 1) % pages;
-            page_set_ms = now;
-            force_relayout = true;
-            ESP_LOGI(TAG, "BOOT键 -> 第 %d/%d 页", page + 1, pages);
-        }
-        btn_prev = btn;
 
         /* 手动翻页 20 秒后自动回第 1 页（关键信息不用手动找回） */
         if (page > 0 && now - page_set_ms > PAGE_HOME_MS) {
             page = 0;
             force_relayout = true;
+            stats_page = false;
         }
 
         int start = page * PAGE_SIZE;
@@ -887,14 +1048,22 @@ static void display_task(void *arg)
         }
 
         /* 刷新策略：每 500ms 全量重画卡片（时长/冒号跳秒），
-         * 中间的 50ms 动画帧只刷各卡色条 + 头部第 1 格 mini-logo */
+         * 中间的 50ms 动画帧只刷各卡色条 + 头部第 1 格 mini-logo。
+         * #077: 按住叠加框期间抑制整页重画（否则每 500ms 会把叠加框
+         * 先擦掉再画回来，肉眼可见闪烁）；统计页无动画，走整页分支 */
         int prev_w = s_slot_w;
         int prev_shown = last_shown;
         layout_slots(shown);
         last_shown = shown;
 
-        bool relayout = force_relayout || (now - last_layout_ms >= 500);
-        if (relayout) {
+        bool relayout = (force_relayout || now - last_layout_ms >= 500) && !hold_overlay;
+        if (stats_page) {
+            if (relayout) {
+                force_relayout = false;
+                last_layout_ms = now;
+                draw_stats_page();
+            }
+        } else if (relayout) {
             force_relayout = false;
             last_layout_ms = now;
             if (s_slot_w != prev_w || shown != prev_shown) {
@@ -911,7 +1080,8 @@ static void display_task(void *arg)
                 draw_card(i, &all[start + i], now, (int32_t)c, s_slot_x[i], s_slot_w);
                 last_card_anim[i] = c;
             }
-            draw_header(all, n, shown, page, pages, now);
+            /* 页码指示只数会话页（统计页有自己的头部） */
+            draw_header(all, n, shown, page, pages - 1, now);
             last_tile0_anim = mode_anim_color(all[0].lamp, mode_color(all[0].lamp),
                                               blend565(mode_color(all[0].lamp), COL_CARD, 140), now);
         } else {

@@ -36,12 +36,13 @@ static const char *k_state_names[] = {
 
 const char *ai_state_name(ai_state_t s)
 {
-    return (s <= AI_STATE_ERROR) ? k_state_names[s] : "?";
+    /* Q06: 负值/越界都返回 "?"——坏数据不许一路打进数组索引 */
+    return (s >= AI_STATE_IDLE && s <= AI_STATE_ERROR) ? k_state_names[s] : "?";
 }
 
 const char *ai_event_name(ai_event_type_t e)
 {
-    return (e <= AI_EV_UNKNOWN) ? k_event_names[e] : "?";
+    return (e >= AI_EV_SESSION_START && e <= AI_EV_UNKNOWN) ? k_event_names[e] : "?";
 }
 
 ai_event_type_t ai_event_from_str(const char *s)
