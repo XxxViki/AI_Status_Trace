@@ -240,6 +240,10 @@ def drain_queue():
                     tok = int(p[1:])
             with open(path, "rb") as f:
                 body = f.read()
+            if not body.strip():
+                os.remove(path)     # #065B: 空 body 事件(幽灵源)直接丢弃
+                log(f"空 body 事件丢弃: {name}")
+                continue
             board_event_raw(ev, src, body, tok)
             os.remove(path)
         except urllib.error.HTTPError as e:
