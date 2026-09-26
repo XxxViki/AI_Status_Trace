@@ -355,6 +355,10 @@ def main():
 
     # 恢复现场: 清掉所有测试前缀的卡(保留真实会话)
     print("\n恢复现场...")
+    # #063: 强制恢复时间缩放(--fast 的 ts=30 残留会让空闲会话 2 分钟被清, 屏幕空)
+    api("/events?event_type=pre-tool-use&ts=1", {"session_id": "ts-final"})
+    ev("session-end", "ts-final")
+    time.sleep(0.5)
     prefixes = ["stA","stB","stD","lay","dup","pasA","urlsid","wrong","full","sx","cx"]
     s = state()
     for c in s["table"]:
