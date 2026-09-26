@@ -5,9 +5,11 @@ import sys
 import urllib.request
 
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+HDR_BG = "2125"     # 表头背景色(模块级: row() 的坏块 fallback 也要用, #065修复2)
 
 
 def row(y, step=1):
+    hdr_bg = HDR_BG
     for _ in range(6):
         try:
             with opener.open(
@@ -21,7 +23,7 @@ def row(y, step=1):
                     if all(ch in "0123456789ABCDEF" for ch in chunk):
                         px.append(chunk)
                     else:
-                        px.append(hdr_bg)         # 坏块按背景处理, 避免 '?' 假象
+                        px.append(hdr_bg)         # 坏块按背景处理(容错)
                 while len(px) < 320:
                     px.append(hdr_bg)
                 return px[:320]
@@ -32,7 +34,7 @@ def row(y, step=1):
 
 
 def main():
-    hdr_bg = "2125"
+    hdr_bg = HDR_BG
     frame = [row(y) for y in range(2, 26)]
     print("头部格子逐像素 (x=110..319, 每列2px):")
     for y_i, pxrow in enumerate(frame):

@@ -349,8 +349,13 @@ def proc_rules():
             import glob as _g
             # #061: 窗口 15min——重建只服务"刚被误清的活会话"(几分钟前还有事件);
             # 长期不活跃的旧会话不该被重建(转录活跃≠会话活着,#060)
-            files = [f for f in _g.glob(CLAUDE_PROJ_GLOB)
-                     if now2 - os.path.getmtime(f) < 900]
+            files = []
+            for f in _g.glob(CLAUDE_PROJ_GLOB):
+                try:
+                    if now2 - os.path.getmtime(f) < 900:      # 15分钟(#061)
+                        files.append(f)
+                except OSError:
+                    pass   # #065修复5: glob与getmtime之间文件被删,跳过该文件
             for f in files:
                 sid = os.path.basename(f)[:-6]
                 enqueue_event("session-start", "claude",
@@ -365,7 +370,7 @@ def proc_rules():
                         tail_lines = fh.read().decode("utf-8", "replace").split("\n")
                     for raw in reversed(tail_lines):
                         raw = raw.strip()
-                        if not raw.startswith(b"{"):
+                        if not raw.startswith("{"):   # #065修复1: raw 是 str, b"{" 会 TypeError 被兜底吞掉
                             continue
                         obj = json.loads(raw)
                         if obj.get("type") != "assistant":

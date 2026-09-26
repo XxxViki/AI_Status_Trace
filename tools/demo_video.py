@@ -127,20 +127,24 @@ def main():
     elapsed = time.time() - t0
     print(f"\n  ✅ 演示完成 ({elapsed:.1f}s)")
 
-    # 断言: 板上不允许残留任何 demo-* 卡（#058 用户要求：测试完顺手清）
+    # 断言: 板上不允许残留任何 demo-* 卡（#058+#065修复4: 区分"验证通过"与"未能验证"）
     time.sleep(1.5)
-    leftover = []
+    leftover = None          # None = 未能验证(4次/state全失败)
     for _ in range(4):
         st = post("/state")
-        if st:
-            leftover = [c["id"] for c in json.loads(st)["table"]
-                        if c["id"].startswith("demo-")]
-            if not leftover:
-                break
-            for sid in leftover:
-                ev("session-end", sid)
+        if st is None:
             time.sleep(1)
-    if leftover:
+            continue
+        leftover = [c["id"] for c in json.loads(st)["table"]
+                    if c["id"].startswith("demo-")]
+        if not leftover:
+            break
+        for sid in leftover:
+            ev("session-end", sid)
+        time.sleep(1)
+    if leftover is None:
+        print("  残留检查: ✗ 未能验证(网络失败) — 请手动 curl /state 确认!")
+    elif leftover:
         print("  残留检查: ✗ 仍有残留 " + str(leftover))
     else:
         print("  残留检查: 干净 ✓")
