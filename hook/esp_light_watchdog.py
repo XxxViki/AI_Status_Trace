@@ -347,8 +347,10 @@ def proc_rules():
             # #059: 重建**所有**活跃转录(2小时内), 不只最新——用户可能同时开着
             # 多个 Claude 会话(如 Desktop 上的审批 + 项目里的工作)
             import glob as _g
+            # #061: 窗口 15min——重建只服务"刚被误清的活会话"(几分钟前还有事件);
+            # 长期不活跃的旧会话不该被重建(转录活跃≠会话活着,#060)
             files = [f for f in _g.glob(CLAUDE_PROJ_GLOB)
-                     if now2 - os.path.getmtime(f) < 21600]   # 6小时(#059)
+                     if now2 - os.path.getmtime(f) < 900]
             for f in files:
                 sid = os.path.basename(f)[:-6]
                 enqueue_event("session-start", "claude",
