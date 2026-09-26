@@ -17,3 +17,8 @@ uint16_t app_display_pixel(int lx, int ly);
 
 /* 调试用：请求切到指定页(下一次循环生效) */
 void app_display_set_page(int page);
+
+/* #069: 配网模式屏幕 —— 进入配网时调用(画配网信息), 提交后调用(画已保存)。
+ * 设置后显示任务暂停正常渲染, 专显配网状态直到重启。 */
+void app_display_enter_setup(void);
+void app_display_show_saved(void);

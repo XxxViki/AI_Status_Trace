@@ -699,6 +699,37 @@ static uint16_t card_anim_color(const ai_card_info_t *info, int64_t now)
     return mode_anim_color(info->lamp, on, off, now);
 }
 
+/* ---------- 配网模式屏幕（#069）----------
+ * 进入配网时显示 AP 信息；提交凭据后显示 SAVED。
+ * s_setup_screen=true 时显示任务暂停正常渲染，专显配网状态。 */
+static volatile bool s_setup_screen = false;
+
+void app_display_enter_setup(void)
+{
+    s_setup_screen = true;
+    /* 清屏 */
+    for (int i = 0; i < PH * PW; i++) s_frame[i] = COL_BG;
+    fill_rect(0, 20, LW - 1, 55, COL_YEL);
+    draw_text_centered(LW / 2, 28, "SETUP MODE", 2, COL_BG);
+    draw_text_centered(LW / 2, 70, "1. Connect WiFi:", 1, COL_TXT);
+    draw_text_centered(LW / 2, 84, "AI-Status-Setup", 2, COL_TXT);
+    draw_text_centered(LW / 2, 106, "2. Password:", 1, COL_TXT);
+    draw_text_centered(LW / 2, 118, "12345678", 2, COL_TXT);
+    draw_text_centered(LW / 2, 140, "3. Open browser:", 1, COL_TXT);
+    draw_text_centered(LW / 2, 152, "192.168.4.1", 2, COL_GRN);
+    flush_all();
+}
+
+void app_display_show_saved(void)
+{
+    s_setup_screen = true;   /* 确保显示任务不覆盖 */
+    for (int i = 0; i < PH * PW; i++) s_frame[i] = COL_BG;
+    fill_rect(0, 40, LW - 1, 80, COL_GRN);
+    draw_text_centered(LW / 2, 50, "SAVED!", 3, COL_BG);
+    draw_text_centered(LW / 2, 100, "Restarting...", 2, COL_TXT);
+    flush_all();
+}
+
 /* ---------- 主任务 ---------- */
 
 #define BOOT_BTN_GPIO     GPIO_NUM_9   /* 厂商确认：BOOT 键=GPIO9，低电平有效 */
@@ -748,6 +779,11 @@ static void display_task(void *arg)
     bool force_relayout = true;              /* 开机画一次 */
 
     for (;;) {
+        /* #069: 配网模式时暂停正常渲染（配网屏幕已由 enter_setup 画好） */
+        if (s_setup_screen) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
         while (xQueueReceive(s_queue, &msg, 0) == pdTRUE) {
             ai_sessions_on_event(&msg);
         }

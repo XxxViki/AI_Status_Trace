@@ -24,6 +24,7 @@
 #include "nvs_flash.h"
 #include "app_wifi.h"
 #include "wifi_config.h"
+#include "app_display.h"
 
 static const char *TAG = "wifi";
 
@@ -43,10 +44,14 @@ static bool setup_flag_get(void)
 {
     nvs_handle_t h;
     uint8_t v = 0;
-    if (nvs_open("wifi_cfg", NVS_READONLY, &h) == ESP_OK) {
+    esp_err_t e = nvs_open("wifi_cfg", NVS_READONLY, &h);
+    if (e == ESP_OK) {
         nvs_get_u8(h, "setup_mode", &v);
         nvs_close(h);
+    } else {
+        ESP_LOGW(TAG, "setup_flag_get: nvs_open err=%s", esp_err_to_name(e));
     }
+    ESP_LOGI(TAG, "setup_flag_get: v=%d", v);
     return v == 1;
 }
 
@@ -160,6 +165,7 @@ static esp_err_t setup_save_post(httpd_req_t *req)
         return ESP_FAIL;
     }
     wifi_config_save(ssid, pass);
+    app_display_show_saved();       /* #069: 屏幕显示 SAVED! */
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req,
         "<meta charset='utf-8'><body style='font-family:sans-serif'>"
@@ -206,6 +212,8 @@ void app_wifi_start_setup_mode(void)
         httpd_register_uri_handler(server, &save);
     }
     ESP_LOGW(TAG, "Setup HTTP ready (192.168.4.1)");
+    /* #069: 屏幕显示配网状态（AP 信息 + IP） */
+    app_display_enter_setup();
 
     for (;;) {                    /* 配网模式不返回——专职服务配置页 */
         vTaskDelay(pdMS_TO_TICKS(1000));
