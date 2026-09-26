@@ -101,7 +101,7 @@ def main():
     # 用 ts 加速让 demo-a1 的审批升级(2min/ts=15≈8s, 从1.8s起算已过5.4s, 再等2s到7.2+触发)
     # #056: 原来这条事件没有 src 且 sid=ts-anchor —— 会造出一张 "?" logo 的卡!
     # 改为: ts 参数 + URL sid 覆盖指向 demo-a1(只推进时间锚,不建新卡)
-    post("/events?event_type=pre-tool-use&ts=15&sid=demo-2-a1", {"session_id": "demo-a1"})
+    post("/events?event_type=pre-tool-use&ts=15&sid=demo-2-a1", {"session_id": "demo-2-a1"})
 
     # 9.0s: 各卡完成 → 绿闪
     at(9.0, "⑥ 各卡完成 → 绿闪/排序刷新")
