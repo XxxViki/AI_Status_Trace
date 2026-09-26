@@ -82,44 +82,45 @@ def main():
 
     # 0.0s: 1 卡 WORKING — 铺满
     at(0.0, "① 1卡 WORKING(黄呼吸) 铺满312px")
-    ev("pre-tool-use", "demo-w1", src="claude", cwd="D:/work/alpha")
+    ev("pre-tool-use", "demo-1-w1", src="claude", cwd="D:/work/1-alpha")
 
     # 1.8s: +APPROVE → 2卡
     at(1.8, "② +APPROVE(黄闪) → 2卡154px, APPROVE抢第1位")
-    ev("permission-request", "demo-a1", src="zcode", cwd="D:/work/beta")
+    ev("permission-request", "demo-2-a1", src="zcode", cwd="D:/work/2-beta")
 
     # 3.6s: +DONE → 3卡
     at(3.6, "③ +DONE(绿) → 3卡101px")
-    ev("stop", "demo-d1", src="trae", cwd="D:/work/gamma")
+    ev("stop", "demo-3-d1", src="trae", cwd="D:/work/3-gamma")
 
     # 5.4s: +第4张 → 折叠
     at(5.4, "④ +第4张 → 折叠进头部mini-logo(半暗)")
-    ev("pre-tool-use", "demo-w2", src="zcode", cwd="D:/work/delta")
+    ev("pre-tool-use", "demo-4-w2", src="zcode", cwd="D:/work/4-delta")
 
     # 7.2s: 审批升级 → 红闪跳第1
     at(7.2, "⑤ 审批升级 → 红闪跳第1位")
     # 用 ts 加速让 demo-a1 的审批升级(2min/ts=15≈8s, 从1.8s起算已过5.4s, 再等2s到7.2+触发)
-    post("/events?event_type=pre-tool-use&ts=15", {"session_id": "ts-anchor"})
+    # #056: 原来这条事件没有 src 且 sid=ts-anchor —— 会造出一张 "?" logo 的卡!
+    # 改为: ts 参数 + URL sid 覆盖指向 demo-a1(只推进时间锚,不建新卡)
+    post("/events?event_type=pre-tool-use&ts=15&sid=demo-2-a1", {"session_id": "demo-a1"})
 
     # 9.0s: 各卡完成 → 绿闪
     at(9.0, "⑥ 各卡完成 → 绿闪/排序刷新")
-    ev("stop", "demo-w1", src="claude")       # alpha 完成(绿闪)
-    ev("stop", "demo-w2", src="zcode")       # delta 完成
+    ev("stop", "demo-1-w1", src="claude")       # alpha 完成(绿闪)
+    ev("stop", "demo-4-w2", src="zcode")       # delta 完成
 
     # 10.8s: 逐张消失
     at(10.8, "⑦ 逐张结束 → 卡片消失")
-    ev("session-end", "demo-d1")              # gamma 消失
-    ev("session-end", "demo-a1")              # beta 消失
+    ev("session-end", "demo-3-d1")              # gamma 消失
+    ev("session-end", "demo-2-a1")              # beta 消失
 
     # 12.6s: 只剩 alpha → 铺满
     at(12.6, "⑧ 只剩1张 → 自动铺满")
 
     # 14.0s: 清屏
     at(14.0, "⑨ 清屏")
-    ev("session-end", "demo-w1")
+    ev("session-end", "demo-1-w1")
     post("/events?event_type=pre-tool-use&ts=1", {"session_id": "ts-rst"})
     post("/events?event_type=session-end", {"session_id": "ts-rst"})
-    post("/events?event_type=session-end", {"session_id": "ts-anchor"})
 
     elapsed = time.time() - t0
     print(f"\n  ✅ 演示完成 ({elapsed:.1f}s)")
