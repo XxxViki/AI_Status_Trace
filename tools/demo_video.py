@@ -129,18 +129,21 @@ def main():
 
     # 断言: 板上不允许残留任何 demo-* 卡（#058 用户要求：测试完顺手清）
     time.sleep(1.5)
-    st = post("/state")
-    if st:
-        leftover = [c["id"] for c in json.loads(st)["table"]
-                    if c["id"].startswith("demo-")]
-        if leftover:
+    leftover = []
+    for _ in range(4):
+        st = post("/state")
+        if st:
+            leftover = [c["id"] for c in json.loads(st)["table"]
+                        if c["id"].startswith("demo-")]
+            if not leftover:
+                break
             for sid in leftover:
                 ev("session-end", sid)
             time.sleep(1)
-            st = post("/state")
-            leftover = [c["id"] for c in json.loads(st)["table"]
-                        if c["id"].startswith("demo-")]
-        print(f"  残留检查: {'干净 ✓' if not leftover else '仍有残留 ' + str(leftover)}")
+    if leftover:
+        print("  残留检查: ✗ 仍有残留 " + str(leftover))
+    else:
+        print("  残留检查: 干净 ✓")
     print("  ts 已恢复")
 
 
