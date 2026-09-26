@@ -344,14 +344,16 @@ def proc_rules():
         now2 = time.time()
         if now2 - _claude_recreate_at > 60:
             _claude_recreate_at = now2
+            # #059: 重建**所有**活跃转录(2小时内), 不只最新——用户可能同时开着
+            # 多个 Claude 会话(如 Desktop 上的审批 + 项目里的工作)
             import glob as _g
-            files = _g.glob(CLAUDE_PROJ_GLOB)
-            if files:
-                newest = max(files, key=os.path.getmtime)
-                sid = os.path.basename(newest)[:-6]
+            files = [f for f in _g.glob(CLAUDE_PROJ_GLOB)
+                     if now2 - os.path.getmtime(f) < 21600]   # 6小时(#059)
+            for f in files:
+                sid = os.path.basename(f)[:-6]
                 enqueue_event("session-start", "claude",
                               json.dumps({"session_id": sid}).encode())
-                log(f"claude 进程 {claude_n} 个但无卡 -> 重建最近会话 {sid[:12]}")
+                log(f"claude 进程在但无卡 -> 重建活跃会话 {sid[:12]}")
 
     # 防护：只清"安静至少 10 秒"的卡
     quiet = [c for c in claude_cards if c.get("idle_s", 0) >= 10]

@@ -121,8 +121,8 @@ def main():
     ALL_DEMO = ["demo-1-w1", "demo-2-a1", "demo-3-d1", "demo-4-w2"]
     for sid in ALL_DEMO:
         ev("session-end", sid)
-    post("/events?event_type=pre-tool-use&ts=1", {"session_id": "ts-rst"})
-    post("/events?event_type=session-end", {"session_id": "ts-rst"})
+    # #059: ts-rst 用 session-end(pre-tool-use 会闪现一张 WORKING 卡)
+    post("/events?event_type=session-end&ts=1", {"session_id": "ts-rst"})
 
     elapsed = time.time() - t0
     print(f"\n  ✅ 演示完成 ({elapsed:.1f}s)")

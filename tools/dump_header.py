@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """头部 mini-logo 区域逐像素 ASCII 渲染（排查 logo 显示问题 #056）"""
 import time
+import sys
 import urllib.request
 
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -14,10 +15,15 @@ def row(y, step=1):
                     timeout=5) as r:
                 s = r.read().decode().strip()
             if len(s) >= 1280:                    # 320点 x 4hex 全量
-                px = [s[i:i+4].upper() for i in range(0, len(s) - 3, 4)
-                      if all(ch in "0123456789ABCDEF" for ch in s[i:i+4])]
+                px = []
+                for i in range(0, len(s) - 3, 4):
+                    chunk = s[i:i + 4].upper()
+                    if all(ch in "0123456789ABCDEF" for ch in chunk):
+                        px.append(chunk)
+                    else:
+                        px.append(hdr_bg)         # 坏块按背景处理, 避免 '?' 假象
                 while len(px) < 320:
-                    px.append("0000")
+                    px.append(hdr_bg)
                 return px[:320]
         except Exception:
             pass
@@ -36,13 +42,10 @@ def main():
             if c == hdr_bg:
                 line += " "
                 continue
-            try:
-                r5 = int(c[0:2], 16) >> 3
-                g6 = int(c[2:4], 16) >> 2
-                b5 = int(c[4:6], 16) >> 3
-            except ValueError:
-                line += "?"
-                continue
+            v = int(c, 16)
+            r5 = (v >> 11) & 0x1F
+            g6 = (v >> 5) & 0x3F
+            b5 = v & 0x1F
             lum = r5 * 2 + g6 * 3 + b5
             line += "#" if lum > 60 else "+"
         print("%2d %s" % (2 + y_i, line))
