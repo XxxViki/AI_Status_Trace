@@ -106,6 +106,57 @@ static uint16_t blend565(uint16_t a, uint16_t b, int ia)
                     |  ((ab * (255 - ia) + bb * ia) / 255));
 }
 
+/* 前向声明（#081 空闲动效在它们定义之前使用） */
+static void draw_char(int x, int y, char c, int scale, uint16_t color);
+static int text_w(const char *s, int scale);
+static void flush_all(void);
+
+/* HSV -> RGB565（#081 空闲动效用：h 0~359, s/v 0~1） */
+static uint16_t hsv565(float h, float s, float v)
+{
+    h = fmodf(h, 360.0f);
+    if (h < 0) {
+        h += 360.0f;
+    }
+    float c = v * s;
+    float x = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f));
+    float m = v - c;
+    float r, g, b;
+    if (h < 60)       { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else              { r = c; g = 0; b = x; }
+    return RGB565((int)((r + m) * 255), (int)((g + m) * 255), (int)((b + m) * 255));
+}
+
+/* ---------- 空闲动效（#081）----------
+ * 无任何会话时整屏画 "TO DO SOMETHING..."：每个字母一个色相（彩虹渐变），
+ * 色带随时间流动 + 字母按正弦波起伏。有会话立刻切回卡片视图。 */
+static void draw_idle_screen(int64_t now)
+{
+    for (int i = 0; i < PH * PW; i++) {
+        s_frame[i] = COL_BG;
+    }
+    /* #084: ×3 大字两行阶梯排布（单行 ×3 = 322px 超宽），波浪相位和
+     * 色相用全局字符序号 gi——跨行连续，视觉上是一条完整的流动色带 */
+    static const char *const k_lines[2] = { "TO DO", "SOMETHING..." };
+    const int k_ly[2] = { 58, 88 };
+    const int SC = 3;
+    float t = now / 1000.0f;
+    int gi = 0;
+    for (int l = 0; l < 2; l++) {
+        int x = (LW - text_w(k_lines[l], SC)) / 2;
+        for (const char *p = k_lines[l]; *p; p++, gi++, x += (FONT5X7_W + 1) * SC) {
+            int dy = (int)(sinf(t * 2.2f - gi * 0.45f) * 4.0f);
+            uint16_t col = hsv565(t * 30.0f + gi * 20.0f, 0.36f, 0.98f);
+            draw_char(x, k_ly[l] + dy, *p, SC, col);
+        }
+    }
+    flush_all();
+}
+
 /* 逻辑区域 -> 物理区域推屏：逻辑矩形的每一行在物理帧里是一段连续内存，
  * 转置后按物理行 memcpy 连续段进过渡缓冲再发送（#017 的行距教训同样适用） */
 static void flush_region(int x0, int y0, int x1, int y1)
@@ -739,6 +790,8 @@ static const char *const k_stat_names[6] = {
 };
 static int64_t s_today_tokens[6];
 static volatile bool s_stats_dirty = false;
+static bool s_last_fullpage = false;   /* #083: 刚画过全屏页(统计/空闲/叠加框),
+                                        * 卡片页 relayout 时需要全宽推屏清缝隙 */
 
 void app_display_set_today_tokens(const char *tool, int64_t today)
 {
@@ -1029,6 +1082,7 @@ static void display_task(void *arg)
             btn_press_start = 0;
             btn_long_fired = false;
             force_relayout = true;      /* 清掉叠加框/恢复正常页 */
+            s_last_fullpage = true;     /* #083: 叠加框横跨缝隙, 回卡片页需全宽推屏 */
         }
 
         /* 手动翻页 20 秒后自动回第 1 页（关键信息不用手动找回） */
@@ -1057,28 +1111,39 @@ static void display_task(void *arg)
         last_shown = shown;
 
         bool relayout = (force_relayout || now - last_layout_ms >= 500) && !hold_overlay;
-        if (stats_page) {
+        /* 分支顺序很重要：n==0 时 pages=1、page=0 恒等于 stats_page——
+         * 空闲动效必须排在统计页之前，否则永远显示空的统计页(黑屏#081) */
+        if (n == 0 && !hold_overlay) {
+            /* #081: 空闲动效——每帧重画（彩虹流动+波浪），全帧 flush。
+             * hold 期间冻结（否则叠加框被冲掉） */
+            draw_idle_screen(now);
+            s_last_fullpage = true;
+        } else if (stats_page) {
             if (relayout) {
                 force_relayout = false;
                 last_layout_ms = now;
                 draw_stats_page();
+                s_last_fullpage = true;
             }
         } else if (relayout) {
             force_relayout = false;
             last_layout_ms = now;
-            if (s_slot_w != prev_w || shown != prev_shown) {
-                /* 卡位几何变化：清整条卡区（避免旧卡残影）。
-                 * #047：整条 320x136 转置后超缓冲，分两条 320x68 刷 */
-                int half = CARD_H / 2;
-                fill_rect(0, CARD_Y0, LW - 1, CARD_Y0 + half - 1, COL_BG);
-                flush_region(0, CARD_Y0, LW - 1, CARD_Y0 + half - 1);
-                fill_rect(0, CARD_Y0 + half, LW - 1, CARD_Y0 + CARD_H - 1, COL_BG);
-                flush_region(0, CARD_Y0 + half, LW - 1, CARD_Y0 + CARD_H - 1);
-            }
+            /* #082: 卡区每次都清（统计/空闲/叠加框是全屏绘制，切回时缝隙
+             * 有旧像素）。#083: 清屏只写帧缓冲、**拼完整幅再推屏**——
+             * 先推空白再画卡片会产生每 500ms 一次的可见空白帧（任务页频闪）。
+             * 无污染且几何没变时缝隙内容没变，连缝都不用推（零多余闪烁）。 */
+            bool need_full = s_last_fullpage || s_slot_w != prev_w || shown != prev_shown;
+            fill_rect(0, CARD_Y0, LW - 1, CARD_Y0 + CARD_H - 1, COL_BG);
             for (int i = 0; i < shown; i++) {
                 uint16_t c = card_anim_color(&all[start + i], now);
                 draw_card(i, &all[start + i], now, (int32_t)c, s_slot_x[i], s_slot_w);
                 last_card_anim[i] = c;
+            }
+            if (need_full) {
+                int half = CARD_H / 2;
+                flush_region(0, CARD_Y0, LW - 1, CARD_Y0 + half - 1);
+                flush_region(0, CARD_Y0 + half, LW - 1, CARD_Y0 + CARD_H - 1);
+                s_last_fullpage = false;
             }
             /* 页码指示只数会话页（统计页有自己的头部） */
             draw_header(all, n, shown, page, pages - 1, now);
