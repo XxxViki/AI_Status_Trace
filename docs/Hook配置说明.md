@@ -1,17 +1,50 @@
 # Hook 配置说明（AI 工具 → ESP32 红绿灯）
 
 > 面向场景：换电脑、换 AI 工具、板子 IP 变了、hook 突然不生效。
-> 涉及两个 AI 工具：**Claude Code** 和 **ZCode**。
+> 涉及三个 AI 工具：**Claude Code**、**ZCode** 和 **Trae(CN)**。
+
+---
+
+## ⚠️ 注意事项：没有一套脚本能通吃所有工具
+
+**板子侧协议是通用的**（8 个事件 + session_id + 可选 tool_name/cwd），但 **AI 工具 → 本地队列** 这一跳的写法因工具/平台而异。踩过的坑：
+
+| 差异维度 | Claude Code | Trae (CN) | ZCode |
+|---|---|---|---|
+| Windows 上跑在哪个 shell | cmd.exe | **PowerShell → cmd.exe 两层** | 插件独立进程 |
+| hooks.json command 格式 | `command` + `args` 数组 | **只能是完整命令字符串** | 插件 JSON 另一套 |
+| PostToolUse stdin 体积 | 小（主要 tool output） | **18-28KB 完整 tool_response** | 适中 |
+| stdin 编码管道 | findstr 能干净抓 | findstr **截断到 40 字节** | 插件机制干净 |
+| 重启才生效？ | ✅ 是 | ✅ 是 | ✅ 是 |
+| 安全开关 | settings.json 隐式 | **UI 要手动勾** | hooks.enabled |
+| Token 存储 | 明文 `.jsonl` 可读 | **SQLCipher 4 加密 DB，hook payload 里也没有** | 明文 SQLite 可读 |
+| Token 能上屏？ | ✅ 自动 | ❌ 目前 tok=0（见下方） | ✅ 自动 |
+
+> **Trae token 上屏：已知限制**
+> Trae 把 token usage 存加密 SQLite（`%APPDATA%\Trae CN\ModularData\ai-agent\database.db`，SQLCipher 4），
+> 密钥在进程内存中。Windows Python 无预编译 SQLCipher 轮子（需 VS C++ Build Tools）。
+> 故 Trae 卡片的 `tok` 字段暂为 0。Hook 事件（状态切换、工具名、项目）全部正常，仅 token 缺失。
+> 未来解法：装 SQLCipher 预编译 DLL + `sqlite3.load_extension()`，或 shell out 到 `sqlcipher.exe`。
+
+**所以每个工具配独立的"适配层"**，底下共享同一个队列 + 同一个 watchdog + 同一个板子协议：
+
+```
+Trae  ──→ trae_hook.py (Python, 专门处理 PowerShell + slim)  ──→ 队列 ──→ watchdog ──→ 板子
+Claude ──→ ai_status_hook.cmd (cmd/findstr 就够)           ──→ ↑
+ZCode ──→ 插件直接写文件                                   ──→ ↑
+```
+
+**接入新工具的正确姿势**：别先跑 install_hooks.py，先写个诊断脚本 dump stdin——看它到底传了什么、多大、编码对不对。
 
 ---
 
 ## 1. 它怎么工作的
 
 ```
-  AI 工具（Claude Code / ZCode）
+  AI 工具（Claude Code / ZCode / Trae）
         │  生命周期事件
         ▼
-  ai_status_hook.cmd          ← 只往本地文件追加一行，约 30ms，不碰网络
+  ai_status_hook.cmd / trae_hook.py  ← 只往本地文件追加一行，约 30ms，不碰网络
         │
         ▼
   ~/.ai_status/queue/*.ev     ← 本地队列
@@ -22,6 +55,8 @@
         ▼
   板子 ESP32-C3               ← 状态机 → LCD 卡片
 ```
+
+**为什么有两个包装脚本**（v5.5 #080）：Claude Code 跑在 cmd.exe 上，`findstr /R ".*"` 能干净地抓 stdin；但 Trae 在 Windows 上**通过 PowerShell → cmd.exe 两层 shell 执行 hook**，`findstr` 的管道 stdin 会损坏 JSON（实测 watchdog 侧 Trae 事件全部丢进"非JSON事件丢弃"）。所以 Trae 走独立的 `trae_hook.py`，Python 直接 `sys.stdin.buffer.read()` 绕开 shell 编码问题。
 
 **为什么绕一层队列**（问题记录 #030）：早期版本是 hook 里直接 `curl` 板子。网络在 AI 的关键路径上，路由器抖一下，AI 的每一次工具调用都要陪等 2 秒。改成"hook 只写本地文件、常驻进程负责转发"后，**网络彻底移出关键路径**，AI 侧的开销从秒级降到约 30ms。
 
@@ -208,18 +243,102 @@ D:\Xxx\Project\Esp32\AI_Light\plugins\
 
 ---
 
-## 6. 队列与看门狗
+## 6. Trae 配置（v5.5 新增）
 
-### 6.1 队列
+### 6.1 装到哪里
+
+`~/.trae-cn/hooks.json` 的 `hooks.<EventName>`，**command 型**。Trae 原生支持 Claude Code 兼容格式。
+
+### 6.2 为什么用 Python 包装脚本
+
+Trae 在 Windows 上通过 **PowerShell → cmd.exe** 两层 shell 执行 hook 命令。Claude Code 用的 `ai_status_hook.cmd` 里 `findstr /R ".*"` 在两层 shell 管道间会**损坏 JSON payload**（实测 watchdog 侧全部 Trae 事件被 drop 为"非JSON事件丢弃"，body 被截断到 40 字节）。
+
+所以 Trae 用独立的 **`trae_hook.py`**——Python 直接 `sys.stdin.buffer.read()`，绕开所有 shell 编码问题。
+
+### 6.3 事件映射
+
+| Trae 原生事件 | 转发为 | 说明 |
+|---|---|---|
+| `SessionStart` | `session-start` | 新会话，建卡 |
+| `UserPromptSubmit` | `prompt-submit` | 用户发话，转 WORKING |
+| `PreToolUse` | `pre-tool-use` | 工具调用前 |
+| `PostToolUse` | `post-tool-use` | 工具调用后 |
+| `Notification` | `notification` | 通知/权限请求，红灯 |
+| `Stop` | `stop` | 回合结束 → DONE 绿 |
+| `SessionEnd` | `session-end` | 会话结束，清卡 |
+
+和 Claude Code 事件集完全一致。
+
+### 6.4 装完之后长什么样
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -X utf8 \"D:\\Xxx\\...\\AI_Status\\hook\\trae_hook.py\" pre-tool-use trae"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+⚠️ **注意格式差异**：Trae 原生 hooks.json 的 `command` 字段是**完整的 shell 命令字符串**（不是 Claude Code 的 `command` + `args` 数组格式）。虽然 Trae 能读取 Claude Code 的 settings.json，但自己的 hooks.json 只接受原生格式。
+
+### 6.5 两个关键坑
+
+**必须重启 Trae + 在设置里启用 Hooks**：
+1. Trae 的 hooks.json 是**启动时加载**的，改完文件必须**重启 Trae** 才会生效（在当前会话里改完不会触发新 hook）
+2. Trae 有安全开关——设置 → Hooks → 为当前工作区勾选"允许执行 Hooks"
+
+没做这两个步骤，hook 完全不触发，但也不会报错。
+
+### 6.6 stdin 载荷结构
+
+Trae 每个事件的 stdin 都是 JSON，包含通用字段 + 事件专有字段。通用字段：
+```json
+{
+  "session_id": "...",
+  "cwd": "工作目录",
+  "hook_event_name": "PreToolUse",
+  "workspace_roots": ["..."]
+}
+```
+
+专有字段举例（PreToolUse）：
+```json
+{
+  "tool_name": "RunCommand",
+  "tool_use_id": "...",
+  "tool_input": { ... }
+}
+```
+
+### 6.7 支持项目级 hooks
+
+除了全局的 `~/.trae-cn/hooks.json`，也可以在项目里放 `.trae/hooks.json`，只对该项目生效。格式一样。
+
+---
+
+## 7. 队列与看门狗
+
+### 7.1 队列
 
 - 目录：`~/.ai_status/queue/`
 - 文件名：`<event>_<tool>_<随机数>.ev`（如 `pre-tool-use_claude_48312.ev`）
-- 写入者：`ai_status_hook.cmd`（AI 侧，约 30ms）
+- 写入者：`ai_status_hook.cmd`（Claude/ZCode 侧）/ `trae_hook.py`（Trae 侧，约 30ms）
 - 消费/删除者：看门狗（转发成功即删）
 
 队列积压说明看门狗没在跑，或板子不可达。
 
-### 6.2 看门狗的四项职责
+### 7.2 看门狗的四项职责
 
 常驻进程，`pythonw hook/esp_light_watchdog.py`，主循环 1 秒一轮：
 
@@ -230,7 +349,7 @@ D:\Xxx\Project\Esp32\AI_Light\plugins\
 | 3 | 进程巡检 | 3s | 进程被杀不产生事件，由它补齐：Claude 进程归零 → 清所有卡；ZCode 退出 → 清卡；有转录但无卡 → 重建 |
 | 4 | token 监视 | 1s | 读 Claude 转录的 usage → `POST /sessions/tok` |
 
-### 6.3 日志与启停
+### 7.3 日志与启停
 
 | 文件 | 内容 |
 |---|---|
@@ -244,7 +363,7 @@ D:\Xxx\Project\Esp32\AI_Light\plugins\
 
 ---
 
-## 7. 验证装好了
+## 8. 验证装好了
 
 按顺序查，卡在哪一步就是哪一环断了：
 
@@ -269,12 +388,13 @@ curl http://192.168.1.20/state
 
 ---
 
-## 8. 排错速查
+## 9. 排错速查
 
 | 症状 | 可能原因 | 处理 |
 |---|---|---|
 | AI 侧明显卡顿 | 又在 hook 里直连板子（旧版包装脚本） | 重跑安装器，确认 `ai_status_hook.cmd` 是 v5 版本（内容含 `queue`） |
-| `hook_exec.log` 无记录 | hook 没装上 / 工具没重启 | 重跑安装器；**ZCode 必须重启** |
+| `hook_exec.log` 无记录 | hook 没装上 / 工具没重启 | 重跑安装器；**ZCode 必须重启**；**Trae 也必须重启** |
+| Trae 事件全部被 drop 为"非JSON事件" | 用了 cmd/findstr 包装脚本（PowerShell 管道损坏 JSON） | 确认 Trae 配置指向 `trae_hook.py`（v5.5），不是 `ai_status_hook.cmd` |
 | 有记录但板子不动 | 看门狗没跑 / IP 错 | 起看门狗；核对 `esp_light_watchdog.py:26` 的 `BOARD` |
 | 队列文件持续积压 | 板子不可达 | `curl /health`；查 IP 是否被 DHCP 换掉 |
 | 卡片卡在红灯不恢复 | 批准事件没被识别 | 查 ZCode 日志尾随是否正常（职责 2） |
@@ -284,9 +404,9 @@ curl http://192.168.1.20/state
 
 ---
 
-## 9. 已知陷阱
+## 10. 已知陷阱
 
-### 9.1 有两份 `install_hooks.py`，别跑错
+### 10.1 有两份 `install_hooks.py`，别跑错
 
 | 路径 | 版本 | 行为 |
 |---|---|---|
@@ -295,27 +415,37 @@ curl http://192.168.1.20/state
 
 跑错旧的那份会把包装脚本覆盖回 v4 的 curl 版本，把网络重新拉回 AI 关键路径。
 
-### 9.2 包装脚本被"双写"
+### 10.2 包装脚本被"双写"
 
 插件（`hooks.json`）引用的是 `AI_Light\hook\ai_status_hook.cmd`，但安装器本体在 `AI_Status\hook\`。所以 `install_hooks.py` 的 `main()` 会把同一份包装脚本**写到两个位置**（`AI_Status/hook/` 和 `AI_Light/hook/`）。
 
 这是为了迁就插件的绝对路径（问题记录 #021）。**改了包装脚本必须重跑安装器**，否则两处不一致。
 
-### 9.3 板子 IP 是 DHCP
+### 10.3 板子 IP 是 DHCP
 
 见第 3 节。建议路由器侧做 DHCP 保留。
 
-### 9.4 ZCode 的 `hooks.enabled`
+### 10.4 ZCode 的 `hooks.enabled`
 
 ZCode 配置文件里 hooks 默认是**关闭**的。虽然 v5 起事件走插件通道，但如果排查时发现事件完全不触发，仍值得确认这个开关的状态。
 
-### 9.5 中文路径 / 中文 .bat
+### 10.5 中文路径 / 中文 .bat
 
 包装脚本 `.cmd` 必须 **ASCII only**（问题记录 #004）。中文会导致编码问题。
 
+### 10.6 Trae 的 findstr 管道损坏问题（v5.5 新增）
+
+Trae 在 Windows 上通过 **PowerShell** 执行 hook 命令，而不是 cmd.exe。如果强行用 `cmd /c ai_status_hook.cmd`，会多一层 PowerShell → cmd.exe 的 shell 嵌套。这个嵌套管道会损坏 `findstr /R ".*"` 读取的 stdin JSON——实测 watchdog 侧全部 Trae 事件被 drop 为"非JSON事件丢弃"，body 被截断到 40 字节。
+
+**不要**在 Trae hooks.json 里用 `ai_status_hook.cmd`，必须用 `trae_hook.py`。
+
+### 10.7 Trae 改完 hooks.json 必须重启
+
+Trae 的 hooks.json 在**会话启动时加载**。在当前会话里改文件、保存，不会触发新 hook。想测试必须关掉当前 Trae 窗口重开。这个行为和 Claude Code 一致，但 ZCode（插件）也需要重启，三者要区分。
+
 ---
 
-## 10. 接入新的 AI 工具
+## 11. 接入新的 AI 工具
 
 协议层是工具无关的 —— **任何工具只要能发出下面这个请求，就能接入**：
 
@@ -325,7 +455,7 @@ curl -X POST "http://192.168.1.20/events?event_type=<事件>&src=<工具名>" \
      -d '{"session_id":"<会话id>","cwd":"<项目路径>","tool_name":"<可选>"}'
 ```
 
-### 10.1 事件类型（板子认这 8 个）
+### 11.1 事件类型（板子认这 8 个）
 
 | 事件 | 语义 | 灯 |
 |---|---|---|
@@ -338,7 +468,7 @@ curl -X POST "http://192.168.1.20/events?event_type=<事件>&src=<工具名>" \
 | `stop` | 回合结束 | DONE（绿闪） |
 | `session-end` | 会话结束 | 清卡 |
 
-### 10.2 参数
+### 11.2 参数
 
 **查询参数**（URL 上）：
 
@@ -356,14 +486,14 @@ curl -X POST "http://192.168.1.20/events?event_type=<事件>&src=<工具名>" \
 | `cwd` | 否 | 项目路径，卡片上显示为项目名（**上限 16 字符**） |
 | `tool_name` | 否 | 最近调用的工具名（**上限 8 字符**） |
 
-### 10.3 接入步骤
+### 11.3 接入步骤
 
 1. 在上面的事件表里找到新工具原生事件对应的语义
 2. 写一个 hook/插件，把原生事件转成 `POST /events`
-3. **别在 hook 里直接发网络请求** —— 按第 6 节的模式，只往 `~/.ai_status/queue/` 写文件
+3. **别在 hook 里直接发网络请求** —— 按第 7 节的模式，只往 `~/.ai_status/queue/` 写文件
 4. 未登记的工具会自动降级成"首字母徽章"（品牌色 + 首字母），**不需要改固件**就能显示
 
-### 10.4 其它 HTTP 接口
+### 11.4 其它 HTTP 接口
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -381,7 +511,8 @@ curl -X POST "http://192.168.1.20/events?event_type=<事件>&src=<工具名>" \
 ```
 AI_Status/hook/
 ├── install_hooks.py           # 安装器（v5，跑这个）
-├── ai_status_hook.cmd         # 包装脚本（安装器生成，勿手改）
+├── ai_status_hook.cmd         # Claude/ZCode 包装脚本（安装器生成，勿手改）
+├── trae_hook.py               # Trae 专用 Python 包装脚本（v5.5，绕开 PowerShell 管道问题）
 ├── claude_token_hook.py       # Claude Stop 专用：转发 stop + token 用量
 ├── esp_light_watchdog.py      # 常驻看门狗 ← 板子 IP 在这里
 └── esp_light_hook.ps1         # v1 原型，已被取代，仅留存参考

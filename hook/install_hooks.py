@@ -32,7 +32,7 @@ BOARD_URL = "http://192.168.1.20"
 # Q13: 必须含 claude_token_hook.py——Stop 装的是它而非 wrapper，
 # 标记表漏了它导致 --remove 卸不掉、每次重装再叠一条（实测叠过 2 条）
 HOOK_MARKERS = ["esp_light_hook.ps1", "/events?event_type=", "ai_status_hook.cmd",
-                "claude_token_hook.py"]
+                "claude_token_hook.py", "trae_hook.py"]
 
 # ---- 事件映射：工具原生事件名 -> ai-light 协议参数 ----
 CLAUDE_EVENTS = {
@@ -169,6 +169,47 @@ def self_check():
     return True
 
 
+def install_trae(remove: bool):
+    """#080: Trae(CN) 原生支持 hooks.json——
+    全局配置 ~/.trae-cn/hooks.json（项目级 .trae/hooks.json 可覆盖）。
+    
+    v5.5 用 Python 包装脚本 trae_hook.py——
+    原因: Trae 在 Windows 上通过 PowerShell 执行 hook, cmd/findstr 的管道 stdin 会损坏 JSON,
+    watchdog 侧全部事件被 drop 为"非JSON事件丢弃"。Python 直接 sys.stdin.buffer.read() 绕过问题。
+    
+    格式: Trae 原生 hooks.json 的 command 是**完整 shell 命令字符串**(无 args 数组),
+    必须符合 Trae 文档规范。
+    
+    注意：Trae 侧还需要在 UI 里为本工作区启用 Hooks（安全开关）。"""
+    path = Path.home() / ".trae-cn" / "hooks.json"
+    if remove:
+        if path.exists():
+            path.write_text("{}", encoding="utf-8")
+            print(f"  Trae hooks 已清空 -> {path}")
+        return
+    trae_hook = str(HOOK_DIR / "trae_hook.py")
+    events = {
+        "SessionStart": "session-start",
+        "UserPromptSubmit": "prompt-submit",
+        "PreToolUse": "pre-tool-use",
+        "PostToolUse": "post-tool-use",
+        "Notification": "notification",
+        "Stop": "stop",
+        "SessionEnd": "session-end",
+    }
+    cfg = {"version": 1, "hooks": {}}
+    for pascal, kebab in events.items():
+        # Trae 原生格式: command 是完整 shell 命令字符串, 不是 args 数组
+        full_cmd = f'python -X utf8 "{trae_hook}" {kebab} trae'
+        cfg["hooks"][pascal] = [
+            {"matcher": "", "hooks": [
+                {"type": "command", "command": full_cmd}
+            ]}
+        ]
+    save_json(path, cfg, "Trae hooks 安装")
+    print("  !! 记得在 Trae 设置里为本工作区启用 Hooks 开关")
+
+
 def main() -> int:
     remove = "--remove" in sys.argv
     if not remove:
@@ -180,6 +221,7 @@ def main() -> int:
         print("安装到 Claude Code 和 ZCode:")
     install_claude(remove)
     install_zcode(remove)
+    install_trae(remove)
     if not remove:
         self_check()
     return 0

@@ -496,11 +496,13 @@ def proc_rules():
     names = process_names()
     claude_n = sum(1 for n in names if n == "claude.exe")
     zcode_alive = any(n == "zcode.exe" for n in names)
+    trae_alive = any(n == "trae cn.exe" for n in names)   # #080: Trae CN
 
     st = board_state()
     cards = st.get("table", [])
     claude_cards = [c for c in cards if c.get("tool") == "claude"]
     zcode_cards = [c for c in cards if c.get("tool") == "zcode"]
+    trae_cards = [c for c in cards if c.get("tool") == "trae"]
 
     # #054: Claude 进程在跑但板上没有 claude 卡（事件丢失/被误清）→ 用最近活跃的
     # 转录文件重建卡（文件名即权威会话 id）。只重建不删除，安全。限流 60s。
@@ -564,6 +566,10 @@ def proc_rules():
     if zcode_cards and not zcode_alive:
         r = board_clear(tool="zcode")
         log(f"ZCode 应用未运行但板上 {len(zcode_cards)} 卡 -> 全清 {r}")
+
+    if trae_cards and not trae_alive:
+        r = board_clear(tool="trae")
+        log(f"Trae 未运行但板上 {len(trae_cards)} 卡 -> 全清 {r}")
 
 
 def main() -> int:
