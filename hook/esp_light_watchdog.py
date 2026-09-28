@@ -97,10 +97,13 @@ def _resolve_mdns(timeout: float = 2.5):
 
 def _discover_board_url():
     # 1) mDNS：板子新固件注册的域名。禁多播的网络解析失败/超时，走下一步。
-    #    解析到过期缓存 IP 时 /health 会失败，自然落入 ARP 兜底
+    #    #089: 返回解析出的 **IP** 而不是域名——Windows 对 .local 基本不缓存，
+    #    每次请求现场解析(~110ms)，实测 HTTP avg 676ms vs 裸 IP 103ms；
+    #    域名进热路径会把事件排队的延迟放大数倍。mDNS 只当"发现手段"，
+    #    不当"日常地址"；IP 变了由自愈自动追。
     ip = _resolve_mdns()
     if ip and _health_ok(f"http://{ip}"):
-        return f"http://{BOARD_MDNS}"
+        return f"http://{ip}"
     # 2) 本机 /24 ping 扫描填 ARP 表，按板子 MAC（烧录固定）反查 + /health 验明正身
     try:
         tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),

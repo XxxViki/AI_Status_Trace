@@ -143,8 +143,10 @@ plugins/
 自动生效。当前推荐直接写域名（板子固件注册了 mDNS）：
 
 ```
-http://aistatus.local     # 推荐：IP 变化无感（mDNS 可用的网络）
-# http://10.0.2.127       # 公司 DHCP 实际地址（自愈的兜底形态）
+http://10.0.2.127         # 推荐：裸 IP。Windows 对 .local 每次请求都现场解析
+                          # (~110ms/次, HTTP 676ms vs IP 103ms)——域名进热路径会
+                          # 把事件排队延迟放大数倍(#089)。IP 变了自愈会自动追
+# http://aistatus.local   # 备选：mDNS 可用且不在意延迟时（一次性脚本用没问题）
 # http://192.168.1.20     # 家里
 ```
 
