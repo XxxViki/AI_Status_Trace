@@ -336,7 +336,16 @@ void app_wifi_start_setup_mode(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    /* #087: APSTA（原来是纯 AP）——STA 侧做一次扫描，给配网页 SSID 候选列表 */
+    /* #088 回归修复：不能在 AP 运行时扫描。APSTA 态下 esp_wifi_scan_start 的
+     * 信道跳变会把 AP 带进异常状态——实测 802.11 关联正常(含块确认)但 DHCP
+     * 广播不通，PC/手机都拿不到地址(A/B 对照：旧版纯 AP 固件 DHCP 正常)。
+     * 改为三段式：STA 态先扫(AP 未起，也无信标暂停问题)→ 停网 → 纯 AP 起网。
+     * AP 起来后的路径与 #067 起的旧版完全一致。 */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    scan_and_build_opts();       /* ~3s：拿周边 SSID 候选列表 */
+    ESP_ERROR_CHECK(esp_wifi_stop());
+
     wifi_config_t ap_cfg = {
         .ap = {
             .ssid = SETUP_AP_SSID,
@@ -346,11 +355,9 @@ void app_wifi_start_setup_mode(void)
             .authmode = WIFI_AUTH_WPA_WPA2_PSK,
         },
     };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
-
-    scan_and_build_opts();   /* 趁手机还没连上 AP，先扫完（~2s 信标暂停无感） */
 
     httpd_handle_t server = NULL;
     httpd_config_t hcfg = HTTPD_DEFAULT_CONFIG();
