@@ -14,3 +14,9 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # 自定义分区表（阶段 2 的 WiFi 凭据要存 NVS，现在就把分区规划好）
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# 控制台走 USB-Serial/JTAG（#085）
+# C3 默认 console 在 UART0(GPIO20/21)，而本板只接了 USB 口 —— 于是
+# idf.py monitor 全程看不到启动日志，串口 SETWIFI/SETBSSID 也收不到输入。
+# 改到 USB 后：同一根线即可看日志 + 串口配网（本板无独立 UART 适配器，无损失）。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

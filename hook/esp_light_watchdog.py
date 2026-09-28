@@ -18,12 +18,17 @@ import glob
 import json
 import os
 import random
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
-BOARD = "http://192.168.1.20"
+# #085: 板子地址不再写死（换网段即失联）——统一走 board_addr 解析：
+# 环境变量 AI_STATUS_BOARD > ~/.ai_status/board_url > 家里默认。
+# board_url() 按 mtime 缓存，改文件后下一轮巡检自动生效，看门狗无需重启。
+from board_addr import board_url
 QUEUE_DIR = os.path.join(os.path.expanduser("~"), ".ai_status", "queue")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".ai_status", "watchdog.log")
 ZCODE_LOG_GLOB = os.path.join(os.path.expanduser("~"), ".zcode", "cli", "log", "zcode-*.jsonl")
@@ -43,13 +48,144 @@ def opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+# ---------- 失联自愈（#087）----------
+# 换网络环境（手机配网/新路由/DHCP 换 IP）后板子地址变化，以前要人跑 find_board.py。
+# 现在看门狗自己找回：失联 >15s 触发，先试 mDNS 域名（新固件注册 aistatus.local），
+# 不通再按 MAC 扫本机 /24（复用 tools/find_board.py）。找回即改写 board_url——
+# 配合 #085 的 mtime 缓存，下一轮巡检无缝切过去，队列里积压的事件接着转发。
+# 退避 60s→180s→540s→900s 封顶：板子长期离线时不骚扰网络。
+HEAL_AFTER_S = 15
+HEAL_INTERVALS = [60, 180, 540, 900]
+BOARD_MDNS = "aistatus.local"
+_board_last_ok = time.time()
+_disc_last_try = 0.0
+_disc_step = 0
+# 评审修复(#087): 发现在后台线程跑（扫网段最长 ~10s，同步跑会拖住 1s 主循环——
+# 批准加速/实时token 全都停摆）。_disc_result=None 无待消费结果，否则 (url,) 元组
+_disc_running = False
+_disc_result = None
+
+
+def _stamp_board_ok() -> None:
+    global _board_last_ok
+    _board_last_ok = time.time()
+
+
+def _health_ok(url: str, timeout: float = 3) -> bool:
+    try:
+        with opener().open(url.rstrip("/") + "/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _resolve_mdns(timeout: float = 2.5):
+    """gethostbyname .local 在无应答网络可能阻塞数秒——线程里跑，限时回收"""
+    box = {}
+
+    def run():
+        try:
+            box["ip"] = socket.gethostbyname(BOARD_MDNS)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box.get("ip")
+
+
+def _discover_board_url():
+    # 1) mDNS：板子新固件注册的域名。禁多播的网络解析失败/超时，走下一步。
+    #    解析到过期缓存 IP 时 /health 会失败，自然落入 ARP 兜底
+    ip = _resolve_mdns()
+    if ip and _health_ok(f"http://{ip}"):
+        return f"http://{BOARD_MDNS}"
+    # 2) 本机 /24 ping 扫描填 ARP 表，按板子 MAC（烧录固定）反查 + /health 验明正身
+    try:
+        tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "tools")
+        sys.path.insert(0, tools_dir)
+        import find_board
+        subs = find_board.local_subnets()
+        if not subs:
+            return None
+        find_board.sweep(subs)
+        for ip2, mac in find_board.arp_table().items():
+            if mac.startswith(find_board.BOARD_MAC) and _health_ok(f"http://{ip2}"):
+                return f"http://{ip2}"
+    except Exception as e:
+        log(f"自动发现异常: {type(e).__name__}: {e}")
+    return None
+
+
+def _apply_discovery(url) -> None:
+    """消费一次发现结果：改写 board_url（保留注释行，只换生效行）"""
+    global _disc_step
+    now = time.time()
+    if not url:
+        _disc_step = min(_disc_step + 1, len(HEAL_INTERVALS) - 1)
+        log(f"板子失联 {int(now - _board_last_ok)}s，自动发现未找到"
+            f"（下次 {HEAL_INTERVALS[_disc_step]}s 后重试）")
+        return
+    _disc_step = 0
+    _stamp_board_ok()
+    old = board_url()
+    if url == old:
+        return
+    try:
+        tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "tools")
+        sys.path.insert(0, tools_dir)
+        import find_board
+        find_board.write_board_url(url)   # 保留注释行，只换生效行
+    except Exception as e:
+        log(f"自愈写配置失败: {type(e).__name__}: {e}")
+        return
+    log(f"板子失联自愈: {old} -> {url}（自动改写 board_url）")
+
+
+def auto_heal_tick() -> None:
+    """每轮巡检调用：板子失联时后台线程找回地址（手机配网后 PC 侧零操作）。
+    主循环只投递/消费结果，永不被 ~10s 的扫描阻塞（批准加速/实时token 不停摆）"""
+    global _disc_last_try, _disc_running, _disc_result
+    now = time.time()
+    healthy = now - _board_last_ok < HEAL_AFTER_S
+    if _disc_result is not None:     # 上一轮线程的产出，本轮消费
+        url, _disc_result = _disc_result[0], None
+        if not healthy:              # 板子已自己恢复则丢弃过期结果，不误改地址
+            _apply_discovery(url)
+        return
+    if healthy:
+        return                       # 板子活着，无需自愈
+    if os.environ.get("AI_STATUS_BOARD"):
+        return                       # 显式覆盖地址时不自作主张
+    if _disc_running:                # 扫描进行中：等它，不重复发起
+        return
+    interval = HEAL_INTERVALS[min(_disc_step, len(HEAL_INTERVALS) - 1)]
+    if now - _disc_last_try < interval:
+        return
+    _disc_last_try = now
+
+    def work():
+        global _disc_running, _disc_result
+        try:
+            _disc_result = (_discover_board_url(),)
+        finally:
+            _disc_running = False
+
+    _disc_running = True
+    threading.Thread(target=work, daemon=True, name="board-discover").start()
+
+
 def board_state():
-    with opener().open(BOARD + "/state", timeout=4) as r:
+    with opener().open(board_url() + "/state", timeout=4) as r:
+        _stamp_board_ok()
         return json.loads(r.read())
 
 
 def board_clear(tool=None, id_prefix=None):
-    url = BOARD + "/sessions/clear?"
+    url = board_url() + "/sessions/clear?"
     if tool:
         url += f"tool={tool}&"
     if id_prefix:
@@ -62,7 +198,7 @@ def board_clear(tool=None, id_prefix=None):
 
 def board_event(event_type, src, session_id, tool_name=None):
     import urllib.parse
-    url = f"{BOARD}/events?event_type={event_type}&src={src}"
+    url = f"{board_url()}/events?event_type={event_type}&src={src}"
     body = {"session_id": session_id}
     if tool_name:
         body["tool_name"] = tool_name
@@ -78,7 +214,7 @@ def board_event_raw(event_type, src, body: bytes, tok: int = 0):
     失败由调用方保序重试（下轮），代价低。
     #033：Python 侧完整解析 body 提取 session/tool 放 URL——板内只扫前512字节，
     Stop 类大载荷的 sessionId 可能在截断线之后（会错落进 "?" 会话）。"""
-    url = f"{BOARD}/events?event_type={event_type}&src={src}"
+    url = f"{board_url()}/events?event_type={event_type}&src={src}"
     sid = ""      # #079: 先赋默认——json.loads 抛异常时 except 跳出,
     tool = ""     # 下面 `if not sid` 才不会 UnboundLocalError(今晚坏 body 实测踩中)
     try:
@@ -207,7 +343,7 @@ def push_tool_stats():
                 del _day_sum[p]
     for tool, v in totals.items():
         try:
-            url = f"{BOARD}/stats/tok?tool={tool}&today={v}"
+            url = f"{board_url()}/stats/tok?tool={tool}&today={v}"
             req = urllib.request.Request(url, data=b"{}", method="POST")
             opener().open(req, timeout=2).read()
         except Exception:
@@ -254,7 +390,7 @@ def zcode_usage_watch():
             if prev == ctx:
                 continue
             try:
-                url = f"{BOARD}/sessions/tok?sid={sid}&tok={ctx}"
+                url = f"{board_url()}/sessions/tok?sid={sid}&tok={ctx}"
                 req = urllib.request.Request(url, data=b"{}",
                                              headers={"Content-Type": "application/json"})
                 with opener().open(req, timeout=2) as r:
@@ -330,7 +466,7 @@ def claude_token_watch():
         if st[4] > 0 and st[4] != st[1]:     # known != pushed -> 推送(失败保持-1下轮重试)
             tok = st[4]
             try:
-                url = f"{BOARD}/sessions/tok?sid={sid}&tok={tok}"
+                url = f"{board_url()}/sessions/tok?sid={sid}&tok={tok}"
                 req = urllib.request.Request(url, data=b"{}",
                                              headers={"Content-Type": "application/json"})
                 with opener().open(req, timeout=2) as r:
@@ -406,6 +542,7 @@ def drain_queue():
                 log(f"非JSON事件丢弃: {name} body[:40]={body[:40]!r}")
                 continue
             board_event_raw(ev, src, body, tok)
+            _stamp_board_ok()      # #087: 任何一次成功通信都证明板子活着
             os.remove(path)
         except urllib.error.HTTPError as e:
             if 400 <= e.code < 500:
@@ -573,7 +710,45 @@ def proc_rules():
 
 
 def main() -> int:
-    log("看门狗启动(v4: 队列转发 + 进程巡检 + 批准加速 + 实时token)")
+    # 单实例锁(#087)：双开实例会抢队列(FileNotFoundError 互踩) + 双份补发。
+    # 实测事故：一个普通实例 + 一个提权实例(用户手动起)并存。
+    try:
+        lock_dir = os.path.join(os.path.expanduser("~"), ".ai_status")
+        lock = os.path.join(lock_dir, "watchdog.pid")
+        os.makedirs(lock_dir, exist_ok=True)
+        try:
+            old = int(open(lock).read().strip() or 0)
+        except Exception:
+            old = 0
+        if old and old != os.getpid():
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {old}", "/FO", "CSV", "/NH"],
+                capture_output=True, timeout=10,
+                creationflags=0x08000000).stdout.decode("gbk", "replace")
+            if "pythonw.exe" in out:
+                # 名字命中后再看命令行：PID 可能被无关 pythonw 复用。
+                # 提权进程读不到命令行（空串）——此时退回按名字判定
+                cl = ""
+                try:
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         f"(Get-CimInstance Win32_Process "
+                         f"-Filter \"ProcessId={old}\").CommandLine"],
+                        capture_output=True, timeout=20,
+                        creationflags=0x08000000)
+                    cl = r.stdout.decode("gbk", "replace")
+                except Exception:
+                    pass
+                if not cl.strip() or "esp_light_watchdog.py" in cl:
+                    log(f"已有实例在跑(pid={old})，本实例退出（防双开抢队列）")
+                    return 0
+                log(f"pid {old} 是别的 pythonw（PID 复用），接管锁")
+        with open(lock, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass   # 锁机制本身不许把看门狗锁死
+
+    log("看门狗启动(v5: 队列转发 + 进程巡检 + 批准加速 + 实时token + 地址自愈#087)")
     tailer = ZCodeLogTailer(ZCODE_LOG_GLOB)
     tick = 0
     while True:
@@ -624,6 +799,12 @@ def main() -> int:
                 proc_rules()
             except Exception as e:
                 log(f"进程巡检跳过: {type(e).__name__}: {e}")
+
+        # 职责七（#087）：板子失联自愈——地址变了自动找回，手机配网后 PC 零操作
+        try:
+            auto_heal_tick()
+        except Exception as e:
+            log(f"自愈异常: {type(e).__name__}: {e}")
 
         time.sleep(1)
 

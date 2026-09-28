@@ -98,7 +98,12 @@ main/
 | GET | /state | 当前灯状态 JSON |
 | POST | /events | 接收 ai-light 协议 HookEvent（event_type/session_id），切灯 |
 
-测试：`curl -X POST http://192.168.1.20/events -d '{"event_type":"stop","session_id":"t1"}'`
+测试（地址取自 `~/.ai_status/board_url`，见下节"板子地址"）：
+
+```bash
+BOARD=$(grep -v '^#' ~/.ai_status/board_url | grep -v '^$' | head -1)
+curl -X POST $BOARD/events -d '{"event_type":"stop","session_id":"t1"}'
+```
 
 ## 阶段状态
 
@@ -115,16 +120,50 @@ main/
 ```
 hook/
 ├── ai_status_hook.cmd      # hook 包装（双档重试，永远 exit 0，ASCII only）——由安装器生成
+├── board_addr.py           # 板子地址统一解析（#085：环境变量 > board_url 文件 > 默认）
 ├── claude_token_hook.py    # Claude Stop 专用：转发 stop 事件 + 附带 transcript token 用量
 ├── install_hooks.py        # 安装器：python install_hooks.py 装两个工具（--remove 卸载）
 ├── esp_light_watchdog.py   # 进程看门狗（见下节）
 └── esp_light_hook.ps1      # v1 原型：已被 ai_status_hook.cmd 取代，仅留存参考
+
+plugins/
+└── ai-status-hooks/        # ZCode 事件插件（#086：hooks.json 7 事件 → wrapper 队列）
 ```
 
 - Claude Code: `~/.claude/settings.json`，7 事件（Notification 承载权限请求）
-- ZCode: `~/.zcode/cli/config.json`，7 事件（原生 PermissionRequest）+ `hooks.enabled=true`
-- 板子 IP 改动：改 install_hooks.py 顶部 BOARD_URL 后重跑安装器
-- 已知限制：路由器 DHCP 可能换 IP（长期方案：路由器绑定 MAC 静态 IP，或固件加 mDNS）
+- ZCode: **插件通道**（#086）——本仓库 `plugins/ai-status-hooks/`，经
+  `~/.zcode/cli/config.json` 的 `plugins.dirs` 内联启用（默认启用，免集市安装；
+  详见 Hook配置说明 §5）。改完插件/config 要重启 ZCode
+- 已知限制：DHCP 换 IP 由失联自愈兜底（mDNS #087 已落地）；长期可再给路由器做
+  MAC 绑定静态 IP，让地址永远不变
+
+### 板子地址（#085/#087：唯一事实来源 + 失联自愈）
+
+日常配置只有**一个文件** `~/.ai_status/board_url`（首个非注释行），watchdog 1~3 秒
+自动生效。当前推荐直接写域名（板子固件注册了 mDNS）：
+
+```
+http://aistatus.local     # 推荐：IP 变化无感（mDNS 可用的网络）
+# http://10.0.2.127       # 公司 DHCP 实际地址（自愈的兜底形态）
+# http://192.168.1.20     # 家里
+```
+
+**换网络环境的完整流程（#087 后，全程不改代码不编辑配置）**：
+
+1. 长按板子 BOOT 3 秒 → 重启进配网模式（屏幕显示热点名）
+2. 手机连 `AI-Status-Setup`（密码 12345678）→ 浏览器 `192.168.4.1`
+   → **SSID 点输入框直接选**（#087 起配网页带扫描列表，不用手敲）→ 输密码 → Connect
+3. 板子重启入网。PC 侧**零操作**：看门狗失联 >15 秒自动找回（先试 mDNS 域名，
+   不通再按 MAC 扫本机 /24），改写 board_url 后队列里积压的事件自动补发
+   （仅 180 秒内积压的——更早的按 #030 设计丢弃，状态事件重放无意义）
+
+手动找回（自愈不可达时，比如板子在别的网段）：`python tools/find_board.py --write`。
+临时覆盖：环境变量 `AI_STATUS_BOARD`（设置后自愈停用，尊重显式指定）。
+
+> 看门狗带单实例锁（`~/.ai_status/watchdog.pid`）——双开会抢队列互踩
+> （FileNotFoundError + 双份补发）。发现日志刷这两个错就查有没有第二个实例。
+> ⚠️ 从 #087 之前的版本升级时，**旧实例不写 pid 文件、锁拦不住它**，需手动结束一次
+> （任务管理器搜 pythonw.exe），之后新实例自会接管。
 
 ## 进程看门狗（杀进程立即清屏 + 批准加速）
 
@@ -132,7 +171,8 @@ hook 是被动事件，进程被杀不产生事件——由主机侧看门狗补
 
 ```
 hook/esp_light_watchdog.py   # pythonw 常驻，3 秒巡检进程表
-hook/. 启动方式: 已配置 Startup 自启动（删除 Startup 里的快捷方式可关闭）
+hook/. 启动方式: Startup 自启动快捷方式「AI Status Watchdog.lnk」（删除即关闭）
+       （新建：把 `pythonw hook/esp_light_watchdog.py` 的快捷方式丢进 startup 文件夹）
 ```
 
 - claude: 进程数归零 -> 清所有 claude 卡；进程数 < 卡数 -> 清最闲的

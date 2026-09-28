@@ -106,9 +106,10 @@ static uint16_t blend565(uint16_t a, uint16_t b, int ia)
                     |  ((ab * (255 - ia) + bb * ia) / 255));
 }
 
-/* 前向声明（#081 空闲动效在它们定义之前使用） */
+/* 前向声明（#081 空闲动效在它们定义之前使用；#085 屏显 IP 用到居中版） */
 static void draw_char(int x, int y, char c, int scale, uint16_t color);
 static int text_w(const char *s, int scale);
+static void draw_text_centered(int cx, int y, const char *s, int scale, uint16_t color);
 static void flush_all(void);
 
 /* HSV -> RGB565（#081 空闲动效用：h 0~359, s/v 0~1） */
@@ -154,6 +155,13 @@ static void draw_idle_screen(int64_t now)
             draw_char(x, k_ly[l] + dy, *p, SC, col);
         }
     }
+    /* #085: 底部显示本机 IP —— 空闲时正是"要配脚本/查连通性"的时刻，
+     * 地址写死在 PC 侧脚本里的坑（换网段即失联）由此变成肉眼可见。 */
+    char ip[20];
+    const char *txt = app_wifi_get_ip(ip, sizeof(ip)) ? ip : "IP NOT READY";
+    char line[32];
+    snprintf(line, sizeof(line), "IP %s", txt);
+    draw_text_centered(LW / 2, 138, line, 1, COL_TXT_DIM);
     flush_all();
 }
 

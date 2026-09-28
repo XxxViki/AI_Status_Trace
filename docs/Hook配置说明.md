@@ -75,8 +75,9 @@ python hook/install_hooks.py
 # 2) 启动看门狗（常驻，负责转发）
 pythonw hook/esp_light_watchdog.py
 
-# 3) 验证
-curl http://192.168.1.20/health
+# 3) 验证（地址以 board_url 文件为准；找不到板子就跑 find_board.py）
+python tools/find_board.py --write      # 首次/换网络：扫出板子并写入地址
+curl "$(grep -v '^#' ~/.ai_status/board_url | grep -v '^$' | head -1)/health"
 ```
 
 | 操作 | 命令 |
@@ -89,24 +90,42 @@ curl http://192.168.1.20/health
 
 ---
 
-## 3. 板子 IP：唯一的真源
+## 3. 板子地址：唯一的真源（#085 改版）
 
-> ⚠️ **板子地址只在 `hook/esp_light_watchdog.py:26` 的 `BOARD` 生效。**
+> ⚠️ **地址不再写在任何脚本里。**
 >
-> `hook/install_hooks.py:30` 里也有个 `BOARD_URL`，那是 v4 时代的遗留常量，**v5 起已完全不被引用**。
-> README 里"板子 IP 改动：改 install_hooks.py 顶部 BOARD_URL 后重跑安装器"这句是**过期的**，
-> 照它改不会生效。
+> 曾经 `hook/esp_light_watchdog.py` 里有个 `BOARD` 常量，`install_hooks.py` 里还有个
+> 更早的 `BOARD_URL`——两处写死、四处引用，换一次网段就全断（#085 事故）。
+> 现在统一由 `hook/board_addr.py` 解析，优先级：
 
-换 IP 的正确做法：
+| 优先级 | 来源 | 用途 |
+|---|---|---|
+| 1 | 环境变量 `AI_STATUS_BOARD` | 临时覆盖（调试/CI） |
+| 2 | `~/.ai_status/board_url` 首个非注释行 | **日常就该改这里** |
+| 3 | 内置默认 `http://192.168.1.20` | 文件缺失时的兜底 |
 
-```python
-# hook/esp_light_watchdog.py:26
-BOARD = "http://192.168.1.20"     # ← 改这里
+改地址的正确做法（**不用重启看门狗**，1~3 秒自动生效）：
+
+```
+# ~/.ai_status/board_url
+http://10.0.2.127
+# 家里
+# http://192.168.1.20
 ```
 
-改完**重启看门狗**（改安装器不重启看门狗是没用的）。
+地址变了但不知道新 IP？按 MAC 扫出来（板子 MAC 烧录即固定）：
 
-**长期建议**：路由器侧给板子做 **DHCP 保留**（绑定 MAC 固定 IP）。否则路由器重启后 IP 可能变，看门狗会静默转发失败。
+```bash
+python tools/find_board.py            # 扫本机 /24，MAC 命中后用 /health 验身份
+python tools/find_board.py --write    # 找到即写入 board_url
+python tools/find_board.py --subnets 10.0.2,10.0.7   # 板子不在本机 /24 时指定
+```
+
+> 烧录 #085 及以后的固件：板子**空闲屏底部会直接显示自己的 IP**，肉眼可读；
+> 且 console 已移到 USB（`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`），
+> `idf.py monitor` 与串口 `SETWIFI` 在同一根 USB 线上都能用。
+
+**长期建议**：路由器侧给板子做 **DHCP 保留**（绑定 MAC 固定 IP），地址就永远不变。
 
 ---
 
@@ -171,19 +190,20 @@ BOARD = "http://192.168.1.20"     # ← 改这里
 
 ---
 
-## 5. ZCode 配置
+## 5. ZCode 配置（#086 改版：内联插件目录）
 
-> ⚠️ **ZCode 不走 `config.json`，走插件。**
+> ⚠️ **ZCode 不走 `config.json` 的 hooks，走插件。**
 >
 > v4 时代 ZCode 的 hook 写在 `~/.zcode/cli/config.json` 的 `hooks.events.<Event>`（process 型）。
-> v5 起改为**插件是唯一事件通道**，`install_hooks.py` 对 config.json 只做一件事：**清理旧版残留**
-> （`install_zcode()` 不安装任何东西）。留着旧条目会造成双重触发（问题记录 #022）。
+> v5 起改为**插件是唯一事件通道**，`install_hooks.py` 对 config.json 的 hooks 只做一件事：
+> **清理旧版残留**（`install_zcode()` 不安装任何 hooks）。留着旧条目会造成双重触发
+> （问题记录 #022）。
 
-### 5.1 插件位置
+### 5.1 插件位置（已入本仓库）
 
 ```
-D:\Xxx\Project\Esp32\AI_Light\plugins\
-├── marketplace.json                     # 本地集市清单
+D:\Project\MyProject\Esp32\AI_Status_Trace\plugins\
+├── marketplace.json                     # 本地集市清单（备选安装路径，见 5.5）
 └── ai-status-hooks/
     ├── .zcode-plugin/plugin.json        # 插件元信息，指向 hooks 文件
     └── hooks/hooks.json                 # 事件 → 命令 的映射
@@ -194,14 +214,31 @@ D:\Xxx\Project\Esp32\AI_Light\plugins\
 ```json
 {
   "name": "ai-status-hooks",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "hooks": "./hooks/hooks.json"
 }
 ```
 
-### 5.2 事件映射
+### 5.2 启用方式：plugins.dirs 内联目录（#086，免集市免安装）
 
-比 Claude 多两个、少两个：
+ZCode 的用户配置 `~/.zcode/cli/config.json` 支持 `plugins.dirs`——列表里的每个
+**插件根目录**（即直接包含 `.zcode-plugin/plugin.json` 的目录）会被当作"内联插件"
+发现，**默认启用**，不需要集市、不需要 UI 安装：
+
+```json
+{
+  "plugins": {
+    "enabled": true,
+    "dirs": [
+      "D:\\Project\\MyProject\\Esp32\\AI_Status_Trace\\plugins\\ai-status-hooks"
+    ]
+  }
+}
+```
+
+（换机器/挪仓库时把路径改掉即可；`dirs` 条目必须是插件根本身，指到父目录不生效。）
+
+### 5.3 事件映射
 
 | ZCode 原生事件 | 转发为 | 说明 |
 |---|---|---|
@@ -215,7 +252,7 @@ D:\Xxx\Project\Esp32\AI_Light\plugins\
 | ~~`SessionEnd`~~ | — | **ZCode 没有** |
 | ~~`Notification`~~ | — | **ZCode 没有** |
 
-### 5.3 hooks.json 的样子
+### 5.4 hooks.json 的样子
 
 ```json
 {
@@ -225,7 +262,7 @@ D:\Xxx\Project\Esp32\AI_Light\plugins\
         "hooks": [
           {
             "type": "command",
-            "command": "cmd /c \"D:\\Xxx\\Project\\Esp32\\AI_Light\\hook\\ai_status_hook.cmd\" pre-tool-use zcode",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" pre-tool-use zcode",
             "timeout": 15
           }
         ]
@@ -235,9 +272,20 @@ D:\Xxx\Project\Esp32\AI_Light\plugins\
 }
 ```
 
-注意这里的命令是**绝对路径**，而且指向的是 **`AI_Light\hook\`（外层目录），不是 `AI_Status\hook\`** —— 见第 9 节的陷阱。
+注意命令是**绝对路径**，指向 **`Esp32\hook\`（仓库外层目录）**——`install_hooks.py`
+双写 wrapper 的位置（#021 的设计：插件路径不随本仓库移动）。
+**hooks.json 本身由安装器自动生成**（#087 评审修复：命令里的绝对路径随 clone 位置
+变，手写就是换机炸弹）——换机器/挪仓库后跑一次 `python hook/install_hooks.py`，
+wrapper 和 hooks.json 一起按新路径重算。
 
-### 5.4 改完插件要重启 ZCode
+### 5.5 备选安装：本地集市（UI 流程）
+
+若不走 `plugins.dirs`（例如想让 ZCode 的插件管理页统一托管），用
+`plugins/marketplace.json`：ZCode 设置 → Plugin Management → Discover → `+` →
+选本地目录 `...\AI_Status_Trace\plugins` → 在卡片上点 Get。
+两种方式**二选一**，同时开会造成事件双发（#022 同型事故）。
+
+### 5.6 改完插件要重启 ZCode
 
 运行中的 ZCode 内存里挂着旧配置，**删文件 / 改文件都不等于生效**。改完插件必须**重启 ZCode** 才会重新载入 hooks。
 

@@ -3,7 +3,12 @@
 import time
 import sys
 import urllib.request
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hook"))
+from board_addr import board_url
+
+BOARD = board_url()   # #085: 地址统一走 ~/.ai_status/board_url，换网段不用改代码
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 HDR_BG = "2125"     # 表头背景色(模块级: row() 的坏块 fallback 也要用, #065修复2)
 
@@ -13,7 +18,7 @@ def row(y, step=1):
     for _ in range(6):
         try:
             with opener.open(
-                    "http://192.168.1.20/dbg/row?y=%d&step=%d" % (y, step),
+                    "%s/dbg/row?y=%d&step=%d" % (BOARD, y, step),
                     timeout=5) as r:
                 s = r.read().decode().strip()
             if len(s) >= 1280:                    # 320点 x 4hex 全量

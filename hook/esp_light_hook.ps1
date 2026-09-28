@@ -11,8 +11,18 @@ param(
     [Parameter(Position = 0)][string]$EventType = ""
 )
 
-# ==== 配置区：板子 IP 变了只需要改这里（未来升级为 mDNS/配置文件）====
-$TargetUrl = "http://192.168.1.20/events"
+# ==== 配置区（#085）: 环境变量 AI_STATUS_BOARD > ~/.ai_status/board_url 首个非注释行 > 默认 ====
+$BoardUrlFile = Join-Path $env:USERPROFILE ".ai_status\board_url"
+$Board = $env:AI_STATUS_BOARD
+if (-not $Board -and (Test-Path $BoardUrlFile)) {
+    $line = Get-Content $BoardUrlFile -ErrorAction SilentlyContinue |
+        Where-Object { $_.Trim() -ne "" -and -not $_.TrimStart().StartsWith("#") } |
+        Select-Object -First 1
+    if ($line) { $Board = $line.Trim() }
+}
+if (-not $Board) { $Board = "http://192.168.1.20" }
+$Board = $Board.Trim().TrimEnd('/')   # 评审修复#087: 尾斜杠会拼出 //events -> 404
+$TargetUrl = "$Board/events"
 
 $LogDir = Join-Path $env:USERPROFILE ".ai_status"
 $LogFile = Join-Path $LogDir "hook.log"

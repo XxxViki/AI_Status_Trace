@@ -20,8 +20,12 @@ import sys
 import time
 import urllib.request
 import urllib.parse
+from pathlib import Path
 
-BOARD = "http://192.168.1.20"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hook"))
+from board_addr import board_url
+
+BOARD = board_url()   # #085: 地址统一走 ~/.ai_status/board_url，换网段不用改代码
 TS = ""          # &ts=30 for fast mode
 FAILS = []
 PASSES = 0

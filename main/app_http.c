@@ -420,6 +420,10 @@ esp_err_t app_http_start(void)
     httpd_handle_t server = NULL;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
 
+    /* #085: 默认槽位 8，本工程注册 9 个路由 —— 第 9 个(/dbg/setup)被静默丢弃，
+     * 每次启动只留一行 "no slots left" 警告。留 12 给后续新增接口余量。 */
+    cfg.max_uri_handlers = 12;
+
     /* 优雅处理客户端突然断开（curl 被 Ctrl+C 等），避免 httpd 报错刷屏 */
     cfg.lru_purge_enable = true;
 

@@ -26,8 +26,9 @@ HOOK_DIR = Path(__file__).resolve().parent
 WRAPPER = HOOK_DIR / "ai_status_hook.cmd"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 ZCODE_SETTINGS = Path.home() / ".zcode" / "cli" / "config.json"
-# 板子地址（IP 变了改这里，重跑本脚本即可）
-BOARD_URL = "http://192.168.1.20"
+# 板子地址(#085)：hook 侧不再写死——事件走本地队列由 watchdog 转发，
+# 板子地址统一在 ~/.ai_status/board_url（环境变量 AI_STATUS_BOARD 可覆盖），
+# 换网段只改那一个文件，本脚本无需重跑。
 # 识别"我们装的 hook"的标记。
 # Q13: 必须含 claude_token_hook.py——Stop 装的是它而非 wrapper，
 # 标记表漏了它导致 --remove 卸不掉、每次重装再叠一条（实测叠过 2 条）
@@ -210,6 +211,27 @@ def install_trae(remove: bool):
     print("  !! 记得在 Trae 设置里为本工作区启用 Hooks 开关")
 
 
+def install_zcode_plugin_hooks():
+    """#086/#087评审修复: 生成 ZCode 插件的 hooks/ai-status-hooks/hooks/hooks.json。
+    命令里必须引用外层 wrapper 的**绝对路径**，而它随 clone 位置变——
+    之前手写死本机路径，换机器/挪仓库后插件加载正常但每个 hook 静默失败。
+    现在由安装器按实际路径生成（ZCODE_EVENTS 就是事件映射的单一事实来源），
+    换机器重跑 `python hook/install_hooks.py` 即自动修正。"""
+    plugin_hooks = (HOOK_DIR.parent / "plugins" / "ai-status-hooks"
+                    / "hooks" / "hooks.json")
+    plugin_hooks.parent.mkdir(parents=True, exist_ok=True)
+    outer = HOOK_DIR.parent.parent / "hook" / "ai_status_hook.cmd"
+    hooks = {}
+    for event, arg in ZCODE_EVENTS.items():
+        cmd = f'cmd /c "{outer}" {arg} zcode'
+        hooks[event] = [{"hooks": [{"type": "command", "command": cmd,
+                                    "timeout": 15}]}]
+    # ensure_ascii=True: 路径含非 ASCII 用户名时也保持文件为纯 ASCII
+    plugin_hooks.write_text(json.dumps({"hooks": hooks}, indent=2) + "\n",
+                            encoding="ascii", newline="\n")
+    print(f"ZCode 插件 hooks 已生成 -> {plugin_hooks}")
+
+
 def main() -> int:
     remove = "--remove" in sys.argv
     if not remove:
@@ -218,6 +240,7 @@ def main() -> int:
         alt.parent.mkdir(parents=True, exist_ok=True)
         alt.write_text(WRAPPER_TEMPLATE, encoding="ascii", newline="")
         print(f"包装脚本已双写: {WRAPPER} + {alt}")
+        install_zcode_plugin_hooks()
         print("安装到 Claude Code 和 ZCode:")
     install_claude(remove)
     install_zcode(remove)

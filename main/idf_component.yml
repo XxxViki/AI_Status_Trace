@@ -1,2 +1,5 @@
-## 组件管理器清单（Q15: cJSON 死依赖已移除，当前无第三方依赖）
-dependencies: {}
+## 组件管理器清单（Q15: cJSON 死依赖已移除）
+## #087: mdns —— 注册 aistatus.local。支持 mDNS 的网络里 PC 侧永远用域名，
+## 换网段/IP 变化都无感；禁多播的公司网由看门狗 ARP 自动发现兜底。
+dependencies:
+  espressif/mdns: "*"
