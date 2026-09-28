@@ -1,0 +1,13 @@
+{
+  "name": "ai-status-local",
+  "plugins": [
+    {
+      "name": "ai-status-hooks",
+      "source": "ai-status-hooks",
+      "version": "0.2.0",
+      "description": "AI Status 状态板：把 ZCode 会话事件转发给 ESP32 红绿灯板",
+      "displayName": "AI Status Hooks",
+      "category": "developer-tools"
+    }
+  ]
+}

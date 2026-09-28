@@ -1,0 +1,9 @@
+{
+  "name": "ai-status-hooks",
+  "version": "0.2.0",
+  "description": "AI Status 状态板：把 ZCode 会话事件转发给 ESP32 红绿灯板（本地队列 + 看门狗转发，网络不在关键路径）",
+  "author": {
+    "name": "ld100"
+  },
+  "hooks": "./hooks/hooks.json"
+}

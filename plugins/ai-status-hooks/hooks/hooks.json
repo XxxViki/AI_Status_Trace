@@ -1,0 +1,81 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" session-start zcode",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" prompt-submit zcode",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" pre-tool-use zcode",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" post-tool-use zcode",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" post-tool-use zcode",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" permission-request zcode",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd /c \"D:\\Project\\MyProject\\Esp32\\hook\\ai_status_hook.cmd\" stop zcode",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
